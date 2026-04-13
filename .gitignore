@@ -1,0 +1,6 @@
+node_modules
+.env
+*.wav
+*.mp3
+uploads
+.DS_Store
