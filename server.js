@@ -17,7 +17,7 @@ const MAX_MEMORY_MESSAGES = 10;
 const memoryStore = {};
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const OUTPUT_AUDIO_PATH = path.join(__dirname, "output.mp3");
-const ALLOWED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3"]);
+const ALLOWED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".caf", ".aac"]);
 const execAsync = promisify(exec);
 
 const generateUniqueFilename = (originalName) => {
@@ -42,7 +42,11 @@ const upload = multer({
       cb(null, true);
       return;
     }
-    cb(new Error("Invalid audio format. Please upload a .wav or .mp3 file."));
+    cb(
+      new Error(
+        "Invalid audio format. Allowed: .wav, .mp3, .m4a, .caf, .aac.",
+      ),
+    );
   },
 });
 
@@ -99,7 +103,6 @@ const createDigitalTwinResponse = async ({ message, userProfile, userId }) => {
     input: reply,
   });
   const audioBuffer = Buffer.from(await speech.arrayBuffer());
-  const audio = audioBuffer.toString("base64");
   await saveAndPlayAudio(audioBuffer);
 
   memoryStore[memoryKey] = [
@@ -108,7 +111,7 @@ const createDigitalTwinResponse = async ({ message, userProfile, userId }) => {
     { role: "assistant", content: reply },
   ].slice(-MAX_MEMORY_MESSAGES);
 
-  return { reply, audio };
+  return { reply, audioBuffer };
 };
 
 app.post("/chat", async (req, res) => {
@@ -127,9 +130,13 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const result = await createDigitalTwinResponse({ message, userProfile, userId });
+    const { reply, audioBuffer } = await createDigitalTwinResponse({
+      message,
+      userProfile,
+      userId,
+    });
     console.log("POST /chat success");
-    return res.json(result);
+    return res.json({ reply, audio: audioBuffer.toString("base64") });
   } catch (error) {
     console.error("POST /chat error:", error);
     return res.status(500).json({
@@ -138,39 +145,55 @@ app.post("/chat", async (req, res) => {
   }
 });
 
+const handleVoiceFile = async (uploadedPath, req, res, { binaryResponse }) => {
+  const { userProfile, userId } = req.body || {};
+
+  if (!uploadedPath) {
+    return res.status(400).json({
+      error: "No audio file received.",
+    });
+  }
+  if (!hasApiKey()) {
+    return res.status(500).json({
+      error: "Missing OPENAI_API_KEY in .env file.",
+    });
+  }
+
+  console.log("Transcribing uploaded audio");
+  const transcription = await openai.audio.transcriptions.create({
+    model: "whisper-1",
+    file: createReadStream(uploadedPath),
+  });
+  const message = transcription.text?.trim();
+  if (!message) {
+    return res.status(400).json({
+      error: "Could not transcribe the uploaded audio.",
+    });
+  }
+
+  const { reply, audioBuffer } = await createDigitalTwinResponse({
+    message,
+    userProfile,
+    userId,
+  });
+
+  if (binaryResponse) {
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Length", String(audioBuffer.length));
+    console.log("POST /upload success (binary audio)");
+    return res.send(audioBuffer);
+  }
+
+  console.log("POST /voice success");
+  return res.json({ reply, audio: audioBuffer.toString("base64") });
+};
+
 app.post("/voice", upload.single("audio"), async (req, res) => {
   const uploadedPath = req.file?.path;
 
   try {
-    const { userProfile, userId } = req.body || {};
     console.log("POST /voice request received");
-
-    if (!uploadedPath) {
-      return res.status(400).json({
-        error: "Please upload an audio file using field name 'audio'.",
-      });
-    }
-    if (!hasApiKey()) {
-      return res.status(500).json({
-        error: "Missing OPENAI_API_KEY in .env file.",
-      });
-    }
-
-    console.log("POST /voice transcribing audio");
-    const transcription = await openai.audio.transcriptions.create({
-      model: "whisper-1",
-      file: createReadStream(uploadedPath),
-    });
-    const message = transcription.text?.trim();
-    if (!message) {
-      return res.status(400).json({
-        error: "Could not transcribe the uploaded audio.",
-      });
-    }
-
-    const result = await createDigitalTwinResponse({ message, userProfile, userId });
-    console.log("POST /voice success");
-    return res.json(result);
+    return await handleVoiceFile(uploadedPath, req, res, { binaryResponse: false });
   } catch (error) {
     console.error("POST /voice error:", error);
     if (error?.message?.includes("Invalid audio format")) {
@@ -185,6 +208,34 @@ app.post("/voice", upload.single("audio"), async (req, res) => {
     }
     return res.status(500).json({
       error: "Failed to process voice request.",
+    });
+  } finally {
+    if (uploadedPath) {
+      await unlink(uploadedPath).catch(() => {});
+    }
+  }
+});
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+  const uploadedPath = req.file?.path;
+
+  try {
+    console.log("POST /upload request received");
+    return await handleVoiceFile(uploadedPath, req, res, { binaryResponse: true });
+  } catch (error) {
+    console.error("POST /upload error:", error);
+    if (error?.message?.includes("Invalid audio format")) {
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+    if (error?.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        error: "File too large. Max allowed size is 10MB.",
+      });
+    }
+    return res.status(500).json({
+      error: "Failed to process upload.",
     });
   } finally {
     if (uploadedPath) {
@@ -221,8 +272,10 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     await mkdir(UPLOADS_DIR, { recursive: true });
-    app.listen(PORT, () => {
-      console.log(`Digital Twin AI backend running on http://localhost:${PORT}`);
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(
+        `Digital Twin AI backend listening on http://0.0.0.0:${PORT} (LAN: use this machine's IP)`,
+      );
     });
   } catch (error) {
     console.error("Server startup error:", error);
