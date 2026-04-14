@@ -1,50 +1,152 @@
-# Welcome to your Expo app 👋
+# My Family AI (Expo app)
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Personal AI family app with four personalities:
+- Mom (Micheal) — loving, overprotective
+- Dad (Colonel) — strict, disciplined tough-love
+- Maher (ICU doctor) — direct, urgency and life perspective
+- Mjeed (pediatric doctor) — funny, sarcastic, Al Ittihad energy
 
-## Get started
+Includes:
+- Voice input (record + Whisper transcription)
+- Character chat and family mode
+- Voice output (TTS, character-specific voice)
+- Firestore memory/profile context injection
+- Personality learning updates after every conversation
+- Daily check-in notifications (5:00 PM default, per-character toggles)
 
-1. Install dependencies
+## Frontend architecture
 
-   ```bash
-   npm install
-   ```
+- `app/setup.tsx`
+  - First-time setup (name, age, goals, reminder time, enabled characters)
+  - Saves profile + notification preferences
+- `app/(tabs)/index.tsx`
+  - Voice-first flow: record -> transcribe -> chat -> auto-play AI audio
+- `app/(tabs)/chat.tsx`
+  - Text chat view + family mode list rendering
+- `app/(tabs)/profile.tsx`
+  - Profile + memory editor and daily check-in settings block
+- `services/api.ts`
+  - Calls `/transcribe`, `/chat`, `/tts`
+- `services/dailyNotifications.ts`
+  - Expo notifications scheduling and character payload routing
+- `services/userFirestore.ts`
+  - User profile/memory/notification pref read-write
 
-2. Start the app
+## Backend architecture (Firebase Functions + Express)
 
-   ```bash
-   npx expo start
-   ```
+- `functions/index.js`
+  - `exports.transcribe`: Whisper-compatible transcription endpoint
+  - `exports.chat`: chat endpoint supporting single character and `/family-chat`
+  - `exports.tts`: character voice synthesis endpoint
+- `functions/chatHandlers.js`
+  - Character system prompts
+  - Context injection from Firestore profile/memory/history
+  - Memory learning extraction (`mood`, `preferences`, `importantFacts`, `emotionalState`, `behaviorPatterns`)
+  - TTS payload inclusion in single-character chat responses
 
-In the output, you'll find options to open the app in a
+## Firestore data shape
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+`users/{uid}` document:
+- `profile`: `{ name, age, goals }`
+- `memory`: `{ mood, preferences, importantFacts, emotionalState, behaviorPatterns }`
+- `notificationPrefs`: `{ enabled, hour, minute, characters: { mom, dad, maher, mjeed } }`
+- `updatedAt`
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+Subcollections:
+- `momMessages`
+- `dadMessages`
+- `maherMessages`
+- `mjeedMessages`
+- `familyMessages`
 
-## Get a fresh project
+## Environment variables
 
-When you're ready, run:
+In app `.env`:
+- `EXPO_PUBLIC_TRANSCRIBE_URL`
+- `EXPO_PUBLIC_CHAT_URL`
+- `EXPO_PUBLIC_TTS_URL`
+- Firebase `EXPO_PUBLIC_FIREBASE_*` values
 
-```bash
-npm run reset-project
+In functions secret manager:
+- `OPENAI_API_KEY`
+
+Optional function env overrides:
+- `OPENAI_CHAT_MODEL` (default: `gpt-4o-mini`)
+- `OPENAI_TRANSCRIBE_MODEL` (default: `gpt-4o-mini-transcribe`, fallback `whisper-1`)
+- `OPENAI_TTS_MODEL` (default: `gpt-4o-mini-tts`)
+
+## API examples
+
+### POST `/transcribe`
+Multipart form with field `audio`.
+
+Response:
+```json
+{ "text": "انا تعبان اليوم" }
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### POST `/chat`
+Headers:
+- `Authorization: Bearer <firebase-id-token>`
 
-## Learn more
+Body (single character):
+```json
+{
+  "character": "mom",
+  "message": "اليوم كان متعب"
+}
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+Response:
+```json
+{
+  "reply": "يا قلبي ليش ما كلمتني بدري؟ أكلت؟ نمت؟ أنا هنا معك 🤍",
+  "audio": {
+    "audioBase64": "<base64-mp3>",
+    "audioMimeType": "audio/mpeg",
+    "voice": "shimmer"
+  }
+}
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+### POST `/family-chat`
+Headers:
+- `Authorization: Bearer <firebase-id-token>`
 
-## Join the community
+Body:
+```json
+{
+  "message": "أنا تعبان"
+}
+```
 
-Join our community of developers creating universal apps.
+Response:
+```json
+{
+  "mom": "تعال أحضنك 🤍",
+  "dad": "وش السبب؟ حل المشكلة",
+  "maher": "تحرك، الحياة قصيرة 💪",
+  "mjeed": "أنت تعبان؟ والاتحاد كسب الليلة 😂⚽"
+}
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+### POST `/tts`
+Headers:
+- `Authorization: Bearer <firebase-id-token>`
+
+Body:
+```json
+{
+  "character": "dad",
+  "text": "ركز وخلك منضبط"
+}
+```
+
+Response:
+```json
+{
+  "audioBase64": "<base64-mp3>",
+  "audioMimeType": "audio/mpeg",
+  "voice": "onyx"
+}
+```
