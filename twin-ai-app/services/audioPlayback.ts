@@ -3,24 +3,6 @@ import * as FileSystem from 'expo-file-system';
 
 let activeSound: Audio.Sound | null = null;
 
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-async function fadeIn(sound: Audio.Sound) {
-  const steps = [0.2, 0.4, 0.6, 0.8, 1];
-  for (const v of steps) {
-    await sleep(45);
-    try {
-      await sound.setVolumeAsync(v);
-    } catch {
-      break;
-    }
-  }
-}
-
 export async function playBase64Mp3(audioBase64: string): Promise<void> {
   if (!audioBase64) return;
   const dir = FileSystem.cacheDirectory;
@@ -35,6 +17,7 @@ export async function playBase64Mp3(audioBase64: string): Promise<void> {
     playsInSilentModeIOS: true,
     staysActiveInBackground: false,
     shouldDuckAndroid: true,
+    playThroughEarpieceAndroid: false,
     interruptionModeIOS: Audio.InterruptionModeIOS.DuckOthers,
     interruptionModeAndroid: Audio.InterruptionModeAndroid.DuckOthers,
   });
@@ -51,10 +34,18 @@ export async function playBase64Mp3(audioBase64: string): Promise<void> {
 
   const { sound } = await Audio.Sound.createAsync(
     { uri: fileUri },
-    { shouldPlay: true, volume: 0 },
+    {
+      shouldPlay: true,
+      volume: 1.0,
+      rate: 1.0,
+      isMuted: false,
+    },
   );
   activeSound = sound;
-  void fadeIn(sound);
+  await sound.setVolumeAsync(1.0);
+  await sound.setRateAsync(1.0, true);
+  await sound.setIsMutedAsync(false);
+
   sound.setOnPlaybackStatusUpdate((status) => {
     if (!status.isLoaded) return;
     if (status.didJustFinish) {

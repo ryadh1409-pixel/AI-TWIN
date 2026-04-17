@@ -4,7 +4,7 @@ import { isFirebaseConfigured } from '@/lib/firebase';
 import { playBase64Mp3 } from '@/services/audioPlayback';
 import {
   sendChatMessage,
-  CHAT_URL,
+  API_URL,
   synthesizeSpeech,
   TTS_URL,
   type NearbyPlaceSuggestion,
@@ -125,8 +125,8 @@ export default function ChatScreen() {
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || !user || !idToken) return;
-    if (!CHAT_URL) {
-      Alert.alert('Config', 'Set EXPO_PUBLIC_CHAT_URL in .env.');
+    if (!API_URL) {
+      Alert.alert('Config', 'Set EXPO_PUBLIC_RAG_BASE_URL in .env.');
       return;
     }
     setSending(true);

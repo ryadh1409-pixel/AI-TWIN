@@ -618,6 +618,7 @@ app.post('/transcribe', upload.single('file'), async (req, res) => {
   }
 });
 
+// Public local TTS endpoint: no Firebase auth token/middleware required.
 app.post('/tts', async (req, res) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';

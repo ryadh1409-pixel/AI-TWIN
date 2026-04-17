@@ -1,8 +1,13 @@
+import * as FileSystem from 'expo-file-system/legacy';
 import { getForegroundCoords } from '@/services/location';
 import type { LatLng } from '@/services/location';
 import type { Character } from '@/services/userFirestore';
 
-const DEFAULT_LOCAL_API = 'http://192.168.0.41:3000';
+/** Fallbacks if env vars are unset (see twin-ai-app/.env). */
+const DEFAULT_API_BASE = 'https://chat-gehsfp2zqa-uc.a.run.app';
+const DEFAULT_TTS_BASE = 'https://tts-gehsfp2zqa-uc.a.run.app';
+/** Firebase HTTPS function — Whisper + OpenAI key stay server-side. */
+const DEFAULT_TRANSCRIBE_URL = 'https://transcribe-gehsfp2zqa-uc.a.run.app';
 
 function trimBase(raw?: string | null): string {
   return String(raw || '')
@@ -10,62 +15,34 @@ function trimBase(raw?: string | null): string {
     .replace(/\/$/, '');
 }
 
-/**
- * Host-only base for default `/transcribe` when EXPO_PUBLIC_TRANSCRIBE_URL is unset.
- * Derived from EXPO_PUBLIC_CHAT_URL if it ends with `/chat`, else used as-is.
- */
-export const FUNCTIONS_BASE_URL = (() => {
-  const c = trimBase(process.env.EXPO_PUBLIC_CHAT_URL);
-  if (!c) return DEFAULT_LOCAL_API;
-  if (c.endsWith('/chat')) {
-    return trimBase(c.replace(/\/chat$/, ''));
-  }
-  return c;
-})();
+/** Single API base from env — use everywhere (no hardcoded LAN URLs). */
+const API_URL = trimBase(process.env.EXPO_PUBLIC_RAG_BASE_URL) || DEFAULT_API_BASE;
+const API_URL_CLEAN = API_URL.replace(/:1$/, '');
 
-/**
- * Local Express + RAG (`/ask`, `/upload`, `/ask-vision`, …). Set EXPO_PUBLIC_RAG_BASE_URL when
- * EXPO_PUBLIC_CHAT_URL points at Cloud Functions so RAG stays local.
- */
-export const API_BASE_URL = (() => {
-  const explicit = trimBase(process.env.EXPO_PUBLIC_RAG_BASE_URL);
-  if (explicit) return explicit;
-  const chat = trimBase(process.env.EXPO_PUBLIC_CHAT_URL);
-  if (chat.includes('cloudfunctions.net')) {
-    return DEFAULT_LOCAL_API;
-  }
-  return chat || DEFAULT_LOCAL_API;
-})();
-/** Explicit base used for RAG endpoints (/ask, /upload, /ask-vision, /upload-pdf). */
-export const RAG_BASE_URL = API_BASE_URL;
-/** Guard against accidental `:1` suffix in the base URL from env edits. */
-const RAG_BASE_URL_CLEAN = RAG_BASE_URL.replace(/:1$/, '');
+export { API_URL };
 
-/** Full URL to POST /chat — env may be host only or …/chat */
-export const CHAT_URL = (() => {
-  const raw = trimBase(process.env.EXPO_PUBLIC_CHAT_URL);
-  if (!raw) return `${DEFAULT_LOCAL_API}/chat`;
-  if (raw.endsWith('/chat')) return raw;
-  return `${raw}/chat`;
-})();
+/** @deprecated Use API_URL — kept for backward compatibility */
+export const API_BASE_URL = API_URL_CLEAN;
+export const RAG_BASE_URL = API_URL_CLEAN;
+export const FUNCTIONS_BASE_URL = API_URL_CLEAN;
 
-/** Full URL to POST /tts */
-export const TTS_URL = (() => {
-  const raw = trimBase(process.env.EXPO_PUBLIC_TTS_URL);
-  if (!raw) return `${DEFAULT_LOCAL_API}/tts`;
-  if (raw.endsWith('/tts')) return raw;
-  return `${raw}/tts`;
-})();
-
+export const CHAT_URL = trimBase(process.env.EXPO_PUBLIC_CHAT_URL) || API_URL_CLEAN;
+/** Dedicated TTS service (POST root; body `{ message }` unchanged). */
+export const TTS_URL = trimBase(process.env.EXPO_PUBLIC_TTS_URL) || DEFAULT_TTS_BASE;
+/** Transcribe (multipart `file` → `{ text }`); no API key in the app bundle. */
 export const TRANSCRIBE_URL =
-  trimBase(process.env.EXPO_PUBLIC_TRANSCRIBE_URL) ||
-  `${FUNCTIONS_BASE_URL}/transcribe`;
-export const PROACTIVE_URL = `${API_BASE_URL}/proactive`;
-export const UPLOAD_URL = `${RAG_BASE_URL_CLEAN}/upload`;
-export const UPLOAD_PDF_URL = `${RAG_BASE_URL_CLEAN}/upload-pdf`;
-export const ASK_URL = `${RAG_BASE_URL_CLEAN}/ask`;
-export const ASK_VISION_URL = `${RAG_BASE_URL_CLEAN}/ask-vision`;
-export const CHAT_AUDIO_URL = `${API_BASE_URL}/chat-audio`;
+  trimBase(process.env.EXPO_PUBLIC_TRANSCRIBE_URL) || DEFAULT_TRANSCRIBE_URL;
+export const PROACTIVE_URL = `${API_URL_CLEAN}/proactive`;
+export const UPLOAD_URL = `${API_URL_CLEAN}/upload`;
+export const UPLOAD_PDF_URL = `${API_URL_CLEAN}/upload-pdf`;
+export const ASK_URL = API_URL_CLEAN;
+export const ASK_VISION_URL = `${API_URL_CLEAN}/ask-vision`;
+export const CHAT_AUDIO_URL = `${API_URL_CLEAN}/chat-audio`;
+
+const JSON_HEADERS = {
+  'Content-Type': 'application/json',
+  Accept: 'application/json',
+} as const;
 
 export type VoicePerson = 'X';
 
@@ -103,10 +80,51 @@ export type ChatResultSingle = {
 
 function parseApiErrorBody(text: string) {
   try {
-    const parsed = JSON.parse(text) as { error?: string };
-    return parsed.error || text;
+    const parsed = JSON.parse(text) as {
+      error?: string | { message?: string };
+    };
+    const err = parsed.error;
+    if (typeof err === 'string') return err;
+    if (err && typeof err === 'object' && typeof err.message === 'string') return err.message;
+    return text;
   } catch {
     return text;
+  }
+}
+
+/** Extract assistant text from various API response shapes */
+function parseReplyText(data: Record<string, unknown>): string {
+  const keys = ['reply', 'answer', 'message', 'response', 'content', 'text'] as const;
+  for (const k of keys) {
+    const v = data[k];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  throw new Error('Invalid API response: expected a string field (reply, answer, message, …)');
+}
+
+/**
+ * POST JSON body `{ message }` — primary chat contract for Cloud Run.
+ */
+export async function postJsonMessage(
+  url: string,
+  message: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { ...JSON_HEADERS },
+      body: JSON.stringify({ message }),
+    });
+    const raw = await res.text();
+    console.log('[api] POST response', { url, status: res.status, raw });
+    if (!res.ok) {
+      console.error('[api] POST error', { url, status: res.status, raw });
+      throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
+    }
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch (error) {
+    console.error('[api] POST failed', { url, error });
+    throw error;
   }
 }
 
@@ -118,9 +136,7 @@ export type ProactiveContextPayload = {
   time: string;
   timeOfDay: string;
   lastActivity: string | null;
-  /** Optional client-side memory hint (e.g. from profile). */
   lastMemory?: string;
-  /** Alias for lastMemory — sent to POST /proactive as `memory`. */
   memory?: string;
 };
 
@@ -137,14 +153,13 @@ export async function sendProactiveContextCheck(
   try {
     const res = await fetch(PROACTIVE_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
+      headers: { ...JSON_HEADERS },
       body: JSON.stringify(payload),
     });
     const raw = await res.text();
+    console.log('[api] POST /proactive response', { status: res.status, raw });
     if (!res.ok) {
+      console.error('[api] POST /proactive error', { status: res.status, raw });
       throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
     }
     return JSON.parse(raw) as ProactiveResult;
@@ -156,40 +171,28 @@ export async function sendProactiveContextCheck(
 
 export async function sendChat(
   message: string,
-  person: VoicePerson = 'X',
-  location?: LatLng | null,
+  _person: VoicePerson = 'X',
+  _location?: LatLng | null,
 ): Promise<ChatResultSingle> {
   try {
-    console.log('[api] POST /chat start', { url: CHAT_URL, person, hasLocation: !!location });
-    const body: Record<string, unknown> = { message, person };
-    if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
-      body.location = { lat: location.lat, lng: location.lng };
-    }
-    const res = await fetch(CHAT_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-    const raw = await res.text();
-    console.log('[api] POST /chat response', { status: res.status, raw });
-    if (!res.ok) {
-      throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
-    }
-    const data = JSON.parse(raw) as ChatResultSingle;
-    if (typeof data.reply !== 'string') {
-      throw new Error('Invalid /chat response: expected { reply: string }');
-    }
-    return data;
+    console.log('[api] POST chat', { url: CHAT_URL });
+    const data = await postJsonMessage(CHAT_URL, message.trim());
+    const reply = parseReplyText(data);
+    return {
+      reply,
+      memoryHint: typeof data.memoryHint === 'string' ? data.memoryHint : null,
+      nearbySuggestions: Array.isArray(data.nearbySuggestions)
+        ? (data.nearbySuggestions as NearbyPlaceSuggestion[])
+        : undefined,
+      nearbySource: typeof data.nearbySource === 'string' ? data.nearbySource : undefined,
+    };
   } catch (error) {
-    console.error('[api] POST /chat error', error);
+    console.error('[api] sendChat error', error);
     throw error;
   }
 }
 
-/** Ingest text into per-user FAISS index (RAG). */
+/** Ingest text into per-user FAISS index — JSON `{ message }` as document text */
 export async function uploadTwinText(
   userId: string,
   text: string,
@@ -203,14 +206,13 @@ export async function uploadTwinText(
     console.log('[api] POST /upload start', { url: UPLOAD_URL, userId: uid });
     const res = await fetch(UPLOAD_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({ text: trimmed, userId: uid }),
+      headers: { ...JSON_HEADERS },
+      body: JSON.stringify({ message: trimmed }),
     });
     const raw = await res.text();
+    console.log('[api] POST /upload response', { status: res.status, raw });
     if (!res.ok) {
+      console.error('[api] POST /upload error', { status: res.status, raw });
       throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
     }
     return JSON.parse(raw) as { ok?: boolean; userId?: string; chunks?: number };
@@ -220,7 +222,6 @@ export async function uploadTwinText(
   }
 }
 
-/** Ingest a PDF into the per-user FAISS index (multipart: file + userId). */
 export async function uploadTwinPdf(
   userId: string,
   file: { uri: string; name?: string; mimeType?: string },
@@ -243,7 +244,9 @@ export async function uploadTwinPdf(
       },
     });
     const raw = await res.text();
+    console.log('[api] POST /upload-pdf response', { status: res.status, raw });
     if (!res.ok) {
+      console.error('[api] POST /upload-pdf error', { status: res.status, raw });
       throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
     }
     const data = JSON.parse(raw) as { ok?: boolean; chunks?: number };
@@ -257,42 +260,26 @@ export async function uploadTwinPdf(
   }
 }
 
-/** RAG question against the user’s stored index. */
 export async function askTwinRag(
   userId: string,
   question: string,
 ): Promise<{ answer: string }> {
+  void userId;
   const q = question.trim();
   if (!q) {
     throw new Error('askTwinRag: empty question');
   }
-  const uid = userId.trim() || 'local-user';
   try {
-    console.log('[api] POST /ask start', { url: ASK_URL, userId: uid });
-    const res = await fetch(ASK_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({ question: q, userId: uid }),
-    });
-    const raw = await res.text();
-    if (!res.ok) {
-      throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
-    }
-    const data = JSON.parse(raw) as { answer?: string };
-    if (typeof data.answer !== 'string') {
-      throw new Error('Invalid /ask response: expected { answer: string }');
-    }
-    return { answer: data.answer };
+    console.log('[api] POST ask', { url: ASK_URL });
+    const data = await postJsonMessage(ASK_URL, q);
+    const answer = parseReplyText(data);
+    return { answer };
   } catch (error) {
-    console.error('[api] POST /ask error', error);
+    console.error('[api] askTwinRag error', error);
     throw error;
   }
 }
 
-/** GPT-4o vision: multipart image + optional question + userId. */
 export async function askTwinVision(
   userId: string,
   image: { uri: string; name?: string; mimeType?: string },
@@ -321,7 +308,9 @@ export async function askTwinVision(
       },
     });
     const raw = await res.text();
+    console.log('[api] POST /ask-vision response', { status: res.status, raw });
     if (!res.ok) {
+      console.error('[api] POST /ask-vision error', { status: res.status, raw });
       throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
     }
     const data = JSON.parse(raw) as { answer?: string };
@@ -335,71 +324,45 @@ export async function askTwinVision(
   }
 }
 
-export async function sendAudio(
-  formData: FormData,
-  person: VoicePerson = 'X',
-): Promise<TranscribeResult> {
-  try {
-    console.log('[api] POST /transcribe start', { url: TRANSCRIBE_URL, person });
-    // Backend currently ignores person, but sending it keeps request shape future-proof.
-    formData.append('person', person);
-    const res = await fetch(TRANSCRIBE_URL, {
-      method: 'POST',
-      body: formData,
-      headers: {
-        Accept: 'application/json',
-      },
-    });
-    const raw = await res.text();
-    console.log('[api] POST /transcribe response', { status: res.status, raw });
-    if (!res.ok) {
-      throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
-    }
-    const data = JSON.parse(raw) as TranscribeResult;
-    if (typeof data.text !== 'string') {
-      throw new Error('Invalid /transcribe response: expected { text: string }');
-    }
-    return data;
-  } catch (error) {
-    console.error('[api] POST /transcribe error', error);
-    throw error;
-  }
-}
-
 export async function textToSpeech(
   text: string,
-  person: VoicePerson = 'X',
+  _person: VoicePerson = 'X',
 ): Promise<AudioPayload> {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) {
+    throw new Error('textToSpeech: empty text');
+  }
   try {
-    console.log('[api] POST /tts start', { url: TTS_URL, person });
+    console.log('[api] POST /tts start', { url: TTS_URL });
     const res = await fetch(TTS_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({ text, person }),
+      headers: { ...JSON_HEADERS },
+      body: JSON.stringify({ message: trimmed }),
     });
     const raw = await res.text();
     console.log('[api] POST /tts response', { status: res.status, raw });
     if (!res.ok) {
+      console.error('[api] POST /tts error', { status: res.status, raw });
       throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
     }
-    const data = JSON.parse(raw) as Partial<AudioPayload>;
-    if (
-      typeof data.audioBase64 !== 'string' ||
-      typeof data.audioMimeType !== 'string' ||
-      typeof data.voice !== 'string'
-    ) {
+    const data = JSON.parse(raw) as Partial<AudioPayload> & {
+      audioBase64?: string;
+      audioMimeType?: string;
+      mimeType?: string;
+    };
+    const b64 = data.audioBase64;
+    const mime = data.audioMimeType ?? data.mimeType;
+    const voice = data.voice ?? 'default';
+    if (typeof b64 !== 'string' || typeof mime !== 'string') {
       throw new Error(
-        'Invalid /tts response: expected { audioBase64, audioMimeType, voice }',
+        'Invalid /tts response: expected { audioBase64, audioMimeType } (or mimeType)',
       );
     }
     return {
-      audioBase64: data.audioBase64,
-      audioMimeType: data.audioMimeType,
+      audioBase64: b64,
+      audioMimeType: mime,
       mimeType: data.mimeType,
-      voice: data.voice,
+      voice,
       storagePath: data.storagePath,
       storageUrl: data.storageUrl ?? null,
     };
@@ -411,16 +374,43 @@ export async function textToSpeech(
 
 export const transcribeAudio = async (
   uri: string,
-  person: VoicePerson = 'X',
+  _person: VoicePerson = 'X',
 ): Promise<TranscribeResult> => {
+  void _person;
   if (!uri) throw new Error('Missing recording URI.');
-  const formData = new FormData();
-  formData.append('file', {
-    uri,
-    name: 'audio.m4a',
-    type: 'audio/m4a',
-  } as any);
-  return sendAudio(formData, person);
+  console.log('[transcribe] URI received:', uri);
+
+  const base64 = await FileSystem.readAsStringAsync(uri, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  console.log('[transcribe] base64 length:', base64.length);
+
+  const res = await fetch(TRANSCRIBE_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      audioBase64: base64,
+      mimeType: 'audio/m4a',
+    }),
+  });
+
+  const raw = await res.text();
+  console.log('[transcribe] response:', { status: res.status, raw });
+
+  if (!res.ok) {
+    console.error('[transcribe] error:', raw);
+    throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
+  }
+
+  const data = JSON.parse(raw) as TranscribeResult;
+  if (typeof data.text !== 'string') {
+    throw new Error('Invalid transcribe response: expected { text: string }');
+  }
+  return data;
 };
 
 export async function sendChatMessage(

@@ -8,7 +8,7 @@ const { fetchSaudiGoogleNewsText } = require("./services/newsService");
 const { notifyDailyReportPlaceholder } = require("./services/pushService");
 const express = require("express");
 const cors = require("cors");
-const multer = require("multer");
+const Busboy = require("busboy");
 const { default: OpenAI, toFile } = require("openai");
 const { createChatHandler } = require("./chatHandlers");
 
@@ -36,124 +36,136 @@ async function requireAuth(req, res, next) {
   }
 }
 
-const ALLOWED_EXT = new Set([
-  ".m4a",
-  ".mp3",
-  ".mp4",
-  ".mpeg",
-  ".mpga",
-  ".wav",
-  ".webm",
-  ".caf",
-  ".aac",
-]);
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const name = (file.originalname || "audio.m4a").toLowerCase();
-    const dot = name.lastIndexOf(".");
-    const ext = dot >= 0 ? name.slice(dot) : "";
-    if (!ext || ALLOWED_EXT.has(ext)) {
-      cb(null, true);
-      return;
-    }
-    cb(new Error(`Unsupported audio type (${ext || "unknown"}).`));
-  },
-});
-
-const transcribeHandler = async (req, res) => {
-  try {
-    const f = req.file;
-    if (!f || !f.buffer) {
-      return res.status(400).json({
-        error: "Missing audio file. Send multipart/form-data with field name `audio`.",
-      });
-    }
-
-    const apiKey = openaiApiKey.value();
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing OpenAI configuration." });
-    }
-
-    const model =
-      process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
-    const openai = new OpenAI({ apiKey });
-    const uploadable = await toFile(
-      f.buffer,
-      f.originalname || "audio.m4a",
-    );
-
-    let transcription;
-    try {
-      transcription = await openai.audio.transcriptions.create({
-        file: uploadable,
-        model,
-      });
-    } catch (primaryErr) {
-      if (model !== "whisper-1") {
-        console.warn(
-          "Transcribe model fallback:",
-          primaryErr?.message || primaryErr,
-        );
-        transcription = await openai.audio.transcriptions.create({
-          file: await toFile(f.buffer, f.originalname || "audio.m4a"),
-          model: "whisper-1",
-        });
-      } else {
-        throw primaryErr;
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        if (!chunks.length) {
+          resolve({});
+          return;
+        }
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch (e) {
+        reject(e);
       }
+    });
+    req.on("error", reject);
+  });
+}
+
+/** Busboy parses multipart in a way that works with React Native FormData. */
+function parseMultipartAudio(req) {
+  return new Promise((resolve, reject) => {
+    const bb = Busboy({
+      headers: req.headers,
+      limits: { fileSize: 25 * 1024 * 1024 },
+    });
+    let fileBuffer = null;
+    let detectedMime = "audio/m4a";
+
+    bb.on("file", (name, file, info) => {
+      if (name !== "file" && name !== "audio") {
+        file.resume();
+        return;
+      }
+      detectedMime = info.mimeType || "audio/m4a";
+      const chunks = [];
+      file.on("data", (d) => chunks.push(d));
+      file.on("limit", () =>
+        reject(new Error("Audio file exceeds size limit")),
+      );
+      file.on("end", () => {
+        fileBuffer = Buffer.concat(chunks);
+      });
+    });
+
+    bb.on("error", reject);
+    bb.on("finish", () => {
+      resolve({ buffer: fileBuffer, mimeType: detectedMime });
+    });
+    req.pipe(bb);
+  });
+}
+
+async function transcribeHttp(req, res) {
+  if (req.method === "OPTIONS") {
+    return res.status(204).send("");
+  }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
+  const apiKey = openaiApiKey.value();
+  if (!apiKey) {
+    return res.status(500).json({ error: "Missing OpenAI configuration." });
+  }
+
+  const contentType = req.headers["content-type"] || "";
+
+  try {
+    let audioBuffer;
+    let mimeType = "audio/m4a";
+
+    if (contentType.includes("application/json")) {
+      const body = await readJsonBody(req);
+      const { audioBase64, mimeType: mt } = body || {};
+      if (!audioBase64 || typeof audioBase64 !== "string") {
+        return res.status(400).json({ error: "Missing audioBase64" });
+      }
+      audioBuffer = Buffer.from(audioBase64, "base64");
+      if (!audioBuffer.length) {
+        return res.status(400).json({ error: "Decoded audio is empty." });
+      }
+      if (typeof mt === "string" && mt) {
+        mimeType = mt;
+      }
+    } else if (contentType.includes("multipart/form-data")) {
+      const { buffer, mimeType: m } = await parseMultipartAudio(req);
+      audioBuffer = buffer;
+      if (m) {
+        mimeType = m;
+      }
+    } else {
+      return res.status(415).json({
+        error: "Expected application/json or multipart/form-data",
+      });
     }
 
-    const text = (transcription.text || "").trim();
-    return res.status(200).json({ text });
+    if (!audioBuffer?.length) {
+      return res.status(400).json({ error: "No audio data" });
+    }
+
+    const openai = new OpenAI({ apiKey });
+    const file = await toFile(audioBuffer, "audio.m4a", { type: mimeType });
+    const result = await openai.audio.transcriptions.create({
+      file,
+      model: "whisper-1",
+    });
+
+    return res.status(200).json({ text: String(result.text ?? "").trim() });
   } catch (err) {
     console.error("transcribe error:", err);
     const message = err?.message || "Transcription failed";
+    if (err instanceof SyntaxError) {
+      return res.status(400).json({ error: "Invalid JSON body" });
+    }
     return res.status(500).json({ error: message });
   }
-};
+}
 
-const app = express();
-app.disable("x-powered-by");
-app.use(cors({ origin: true }));
-app.options("*", cors({ origin: true }));
-
-const audioUpload = upload.single("audio");
-
-app.post("/", (req, res, next) => {
-  audioUpload(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ error: err.message || "Upload error" });
-    }
-    next();
-  });
-}, transcribeHandler);
-
-app.post("/transcribe", (req, res, next) => {
-  audioUpload(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ error: err.message || "Upload error" });
-    }
-    next();
-  });
-}, transcribeHandler);
-
-app.use((req, res) => {
-  res.status(404).json({ error: "Not found" });
-});
-
+/** HTTPS (Gen 2): JSON `{ audioBase64 }` or Busboy multipart `file`/`audio` → Whisper */
 exports.transcribe = onRequest(
   {
     secrets: [openaiApiKey],
     cors: true,
     timeoutSeconds: 120,
-    memory: "512MiB",
+    memory: "1GiB",
     maxInstances: 20,
     invoker: "public",
   },
-  app,
+  transcribeHttp,
 );
 
 const chatApp = express();

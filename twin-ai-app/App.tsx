@@ -1,18 +1,15 @@
 import { Audio } from 'expo-av';
+import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import { useEffect, useRef, useState } from 'react';
-import { NearbyPlaceChips } from '@/components/NearbyPlaceChips';
-import { getForegroundCoords, type LatLng } from '@/services/location';
-import {
-  API_BASE_URL,
-  askTwinRag,
-  askTwinVision,
-  CHAT_AUDIO_URL,
-  type NearbyPlaceSuggestion,
-} from '@/services/api';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { GeniusAvatar, type GeniusAvatarMode } from '@/components/GeniusAvatar';
+import { ThinkingIndicator } from '@/components/ThinkingIndicator';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -23,14 +20,17 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { askTwinRag, askTwinVision, transcribeAudio, uploadTwinPdf } from '@/services/api';
+import { speak } from '@/services/elevenlabs';
 
-const LOCAL_USER_ID = 'local-user';
-const MAX_MSG = 20;
+const USER_ID = 'local-user';
+const MAX_MESSAGES = 20;
 
-type AppMessage = {
+type ChatMessage = {
   id: string;
   role: 'user' | 'ai';
   text: string;
+  timestamp: number;
   imageUri?: string;
 };
 
@@ -42,613 +42,684 @@ type PendingImage = {
 
 export default function App() {
   const recordingRef = useRef<Audio.Recording | null>(null);
-  const locationRef = useRef<LatLng | null>(null);
-  const listRef = useRef<FlatList<AppMessage>>(null);
+  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const pulseAnim = useRef(new Animated.Value(0)).current;
+  const pressScaleAnim = useRef(new Animated.Value(1)).current;
 
-  const [isRecording, setIsRecording] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [memoryHint, setMemoryHint] = useState('');
-  const [status, setStatus] = useState('Tap to start recording');
-  const [transcript, setTranscript] = useState('');
-  const [reply, setReply] = useState('');
-  const [locationLabel, setLocationLabel] = useState('Location: not yet');
-  const [nearbySuggestions, setNearbySuggestions] = useState<NearbyPlaceSuggestion[]>([]);
-  const [nearbySource, setNearbySource] = useState<string | undefined>();
-
-  const [messages, setMessages] = useState<AppMessage[]>([]);
-  const [textDraft, setTextDraft] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState('');
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
-
-  const pushPair = (userText: string, aiText: string, imageUri?: string) => {
-    const t = Date.now();
-    const userMsg: AppMessage = imageUri
-      ? { id: `u-${t}`, role: 'user', text: userText, imageUri }
-      : { id: `u-${t}`, role: 'user', text: userText };
-    const aiMsg: AppMessage = { id: `a-${t}`, role: 'ai', text: aiText };
-    setMessages((prev) => [...prev, userMsg, aiMsg].slice(-MAX_MSG));
-  };
-
-  const pushUser = (text: string, imageUri?: string) => {
-    const userMsg: AppMessage = imageUri
-      ? { id: `u-${Date.now()}`, role: 'user', text, imageUri }
-      : { id: `u-${Date.now()}`, role: 'user', text };
-    setMessages((prev) => [...prev, userMsg].slice(-MAX_MSG));
-  };
-
-  const pushAi = (text: string) => {
-    const aiMsg: AppMessage = { id: `a-${Date.now()}`, role: 'ai', text };
-    setMessages((prev) => [...prev, aiMsg].slice(-MAX_MSG));
-  };
+  const [isLoading, setIsLoading] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPdfUploading, setIsPdfUploading] = useState(false);
+  const [micAllowed, setMicAllowed] = useState<boolean>(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   useEffect(() => {
     listRef.current?.scrollToEnd({ animated: true });
-  }, [messages.length]);
+  }, [messages.length, isTyping, isSpeaking]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const coords = await getForegroundCoords();
-      if (cancelled) return;
-      if (coords) {
-        locationRef.current = coords;
-        setLocationLabel(`Location: ${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`);
-      } else {
-        setLocationLabel('Location: off or unavailable');
+    void (async () => {
+      try {
+        const permission = await Audio.requestPermissionsAsync();
+        setMicAllowed(permission.status === 'granted');
+      } catch {
+        setMicAllowed(false);
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    if (isRecording) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 700,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 0,
+            duration: 700,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ]),
+      ).start();
+    } else {
+      pulseAnim.stopAnimation();
+      pulseAnim.setValue(0);
+    }
+  }, [isRecording, pulseAnim]);
+
+  useEffect(() => {
     return () => {
-      cancelled = true;
+      void (async () => {
+        try {
+          if (recordingRef.current) await recordingRef.current.stopAndUnloadAsync();
+        } catch {
+          /* ignore */
+        }
+      })();
     };
   }, []);
 
-  const playBase64Audio = async (audioBase64: string, mimeType: string) => {
-    await Audio.setAudioModeAsync({
-      playsInSilentModeIOS: true,
-      shouldDuckAndroid: true,
-    });
-    const { sound } = await Audio.Sound.createAsync({
-      uri: `data:${mimeType};base64,${audioBase64}`,
-    });
-    await sound.playAsync();
-    sound.setOnPlaybackStatusUpdate((playbackStatus) => {
-      if (playbackStatus.isLoaded && playbackStatus.didJustFinish) {
-        void sound.unloadAsync();
-      }
-    });
+  const pushMessage = (role: 'user' | 'ai', text: string, imageUri?: string) => {
+    const message: ChatMessage = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      role,
+      text,
+      timestamp: Date.now(),
+      ...(imageUri ? { imageUri } : {}),
+    };
+    setMessages((prev) => [...prev, message].slice(-MAX_MESSAGES));
   };
 
-  const startRecording = async () => {
-    const permission = await Audio.requestPermissionsAsync();
-    if (permission.status !== 'granted') {
-      throw new Error('Microphone permission is required.');
-    }
+  const arTimeFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat('ar-EG', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      }),
+    [],
+  );
 
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-    });
-
-    const { recording } = await Audio.Recording.createAsync(
-      Audio.RecordingOptionsPresets.HIGH_QUALITY,
-    );
-    recordingRef.current = recording;
-    setIsRecording(true);
-    setStatus('Recording... tap again to stop');
-  };
-
-  const stopRecordingAndSend = async () => {
-    const recording = recordingRef.current;
-    if (!recording) throw new Error('No active recording.');
-
-    setIsLoading(true);
-    setStatus('Stopping recording...');
-    await recording.stopAndUnloadAsync();
-    recordingRef.current = null;
-    setIsRecording(false);
-
-    const uri = recording.getURI();
-    if (!uri) throw new Error('Failed to read recording file.');
-
-    setStatus('Uploading audio...');
-    const fresh = await getForegroundCoords();
-    if (fresh) {
-      locationRef.current = fresh;
-      setLocationLabel(`Location: ${fresh.lat.toFixed(4)}, ${fresh.lng.toFixed(4)}`);
-    }
-
-    const formData = new FormData();
-    formData.append('file', {
-      uri,
-      name: 'recording.m4a',
-      type: 'audio/m4a',
-    } as any);
-    formData.append('person', 'X');
-    formData.append('userId', LOCAL_USER_ID);
-    const coords = locationRef.current;
-    if (coords) {
-      formData.append('location', JSON.stringify({ lat: coords.lat, lng: coords.lng }));
-    }
-
-    const response = await fetch(CHAT_AUDIO_URL, {
-      method: 'POST',
-      body: formData,
-    });
-
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload?.error || 'Backend request failed.');
-    }
-
-    const t = String(payload.transcript || '');
-    const r = String(payload.reply || '');
-    setTranscript(t);
-    setReply(r);
-    setMemoryHint(payload.memoryHint || '');
-    setNearbySuggestions(
-      Array.isArray(payload.nearbySuggestions) ? payload.nearbySuggestions : [],
-    );
-    setNearbySource(
-      typeof payload.nearbySource === 'string' ? payload.nearbySource : undefined,
-    );
-
-    if (t || r) {
-      pushPair(t || '(voice)', r || '…', undefined);
-    }
-
-    if (!payload.audioBase64) {
-      throw new Error('Backend did not return audio.');
-    }
-
-    setStatus('Playing AI voice...');
-    await playBase64Audio(payload.audioBase64, payload.mimeType || 'audio/mpeg');
-    setStatus('Done. Tap to record again.');
-  };
-
-  const onRecordPress = async () => {
-    if (isLoading) return;
+  const formatTime = (timestamp: number) => {
     try {
-      if (!isRecording) {
-        await startRecording();
+      return arTimeFormatter.format(new Date(timestamp));
+    } catch {
+      return '';
+    }
+  };
+
+  const lastAiMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'ai') return messages[i].id;
+    }
+    return null;
+  }, [messages]);
+
+  const pickImage = async (source: 'library' | 'camera') => {
+    try {
+      if (source === 'library') {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (perm.status !== 'granted') {
+          Alert.alert('Permission', 'Photo library access is required.');
+          return;
+        }
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.9,
+        });
+        if (result.canceled || !result.assets[0]) return;
+        const file = result.assets[0];
+        setPendingImage({
+          uri: file.uri,
+          mimeType: file.mimeType ?? 'image/jpeg',
+          fileName: file.fileName ?? 'photo.jpg',
+        });
       } else {
-        await stopRecordingAndSend();
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (perm.status !== 'granted') {
+          Alert.alert('Permission', 'Camera access is required.');
+          return;
+        }
+        const result = await ImagePicker.launchCameraAsync({ quality: 0.9 });
+        if (result.canceled || !result.assets[0]) return;
+        const file = result.assets[0];
+        setPendingImage({
+          uri: file.uri,
+          mimeType: file.mimeType ?? 'image/jpeg',
+          fileName: file.fileName ?? 'photo.jpg',
+        });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.log('[voice-flow] error:', message);
-      setStatus('Error. Tap to try again.');
-      setIsRecording(false);
-      Alert.alert('Voice Flow Error', message);
-    } finally {
-      setIsLoading(false);
+      Alert.alert('Image', error instanceof Error ? error.message : String(error));
     }
   };
 
-  const openImageSource = (source: 'library' | 'camera') => {
-    void (async () => {
-      try {
-        if (source === 'library') {
-          const { status } =
-            await ImagePicker.requestMediaLibraryPermissionsAsync();
-          if (status !== 'granted') {
-            Alert.alert('Photos', 'Allow photo library access to attach images.');
-            return;
-          }
-          const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
-            quality: 0.85,
-          });
-          if (result.canceled || !result.assets[0]) return;
-          const a = result.assets[0];
-          setPendingImage({
-            uri: a.uri,
-            mimeType: a.mimeType ?? 'image/jpeg',
-            fileName: a.fileName ?? 'photo.jpg',
-          });
-        } else {
-          const { status } =
-            await ImagePicker.requestCameraPermissionsAsync();
-          if (status !== 'granted') {
-            Alert.alert('Camera', 'Allow camera access to take a photo.');
-            return;
-          }
-          const result = await ImagePicker.launchCameraAsync({
-            quality: 0.85,
-          });
-          if (result.canceled || !result.assets[0]) return;
-          const a = result.assets[0];
-          setPendingImage({
-            uri: a.uri,
-            mimeType: a.mimeType ?? 'image/jpeg',
-            fileName: a.fileName ?? 'photo.jpg',
-          });
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        Alert.alert('Image', msg);
-      }
-    })();
-  };
-
-  const showImageOptions = () => {
-    Alert.alert('Add image', 'Choose a source', [
-      { text: 'Photo library', onPress: () => openImageSource('library') },
-      { text: 'Take photo', onPress: () => openImageSource('camera') },
+  const showImagePicker = () => {
+    Alert.alert('Attach image', 'Choose source', [
+      { text: 'Photo Library', onPress: () => void pickImage('library') },
+      { text: 'Take Photo', onPress: () => void pickImage('camera') },
       { text: 'Cancel', style: 'cancel' },
     ]);
   };
 
-  const sendComposer = async () => {
-    const q = textDraft.trim();
+  const sendMessage = async () => {
+    const q = input.trim();
     const img = pendingImage;
     if (!q && !img) return;
-    setTextDraft('');
+
+    setInput('');
     setPendingImage(null);
+    pushMessage('user', q, img?.uri);
     setIsLoading(true);
-    setStatus('Sending…');
+    setIsTyping(true);
+
     try {
       if (img) {
-        pushUser(q, img.uri);
         const { answer } = await askTwinVision(
-          LOCAL_USER_ID,
-          {
-            uri: img.uri,
-            mimeType: img.mimeType,
-            name: img.fileName,
-          },
+          USER_ID,
+          { uri: img.uri, mimeType: img.mimeType, name: img.fileName },
           q || undefined,
         );
-        pushAi(answer);
+        pushMessage('ai', answer);
       } else {
-        pushUser(q);
-        const { answer } = await askTwinRag(LOCAL_USER_ID, q);
-        pushAi(answer);
+        const { answer } = await askTwinRag(USER_ID, q);
+        pushMessage('ai', answer);
       }
-      setStatus('Done.');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      Alert.alert('Send failed', msg);
-      setStatus('Error');
+    } catch (error) {
+      pushMessage('ai', 'حدث خطأ.');
+      Alert.alert('Send failed', error instanceof Error ? error.message : String(error));
     } finally {
+      setIsTyping(false);
+      setIsLoading(false);
+      setIsSpeaking(false);
+    }
+  };
+
+  const animateMicPress = (toValue: number) => {
+    Animated.spring(pressScaleAnim, {
+      toValue,
+      speed: 20,
+      bounciness: 8,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const startRecording = async () => {
+    if (isLoading || isPdfUploading || isRecording) return;
+    try {
+      if (!micAllowed) {
+        const permission = await Audio.requestPermissionsAsync();
+        const granted = permission.status === 'granted';
+        setMicAllowed(granted);
+        if (!granted) {
+          Alert.alert('Microphone', 'Microphone permission is required.');
+          return;
+        }
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY,
+      );
+      recordingRef.current = recording;
+      setIsRecording(true);
+    } catch (error) {
+      setIsRecording(false);
+      Alert.alert('Recording error', error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const stopRecordingAndAsk = async () => {
+    const recording = recordingRef.current;
+    if (!recording || !isRecording) return;
+
+    setIsRecording(false);
+    setIsLoading(true);
+    setIsTyping(true);
+
+    try {
+      await recording.stopAndUnloadAsync();
+      recordingRef.current = null;
+      const uri = recording.getURI();
+      if (!uri) throw new Error('Failed to read recording file.');
+
+      const { text } = await transcribeAudio(uri, 'X');
+      const transcript = text.trim();
+      if (!transcript) {
+        setIsTyping(false);
+        setIsLoading(false);
+        return;
+      }
+
+      pushMessage('user', transcript);
+      const { answer } = await askTwinRag(USER_ID, transcript);
+      pushMessage('ai', answer);
+      setIsTyping(false);
+      setIsLoading(false);
+      await speak(answer, {
+        onPlaybackStart: () => setIsSpeaking(true),
+        onPlaybackEnd: () => setIsSpeaking(false),
+      });
+    } catch (error) {
+      Alert.alert('Voice failed', error instanceof Error ? error.message : String(error));
+      setIsSpeaking(false);
+    } finally {
+      setIsTyping(false);
       setIsLoading(false);
     }
   };
 
-  const canSend = textDraft.trim().length > 0 || pendingImage != null;
-  const sendDisabled = !canSend || isLoading;
+  const uploadPdf = async () => {
+    if (isLoading || isPdfUploading) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const file = result.assets?.[0];
+      if (!file?.uri) return;
+
+      setIsPdfUploading(true);
+      const out = await uploadTwinPdf(USER_ID, {
+        uri: file.uri,
+        name: file.name,
+        mimeType: file.mimeType ?? 'application/pdf',
+      });
+      Alert.alert('PDF Uploaded', `Indexed ${out.chunks} chunk(s).`);
+    } catch (error) {
+      Alert.alert('PDF upload failed', error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsPdfUploading(false);
+    }
+  };
+
+  const pulseScale = pulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 1.16],
+  });
+
+  const pulseOpacity = pulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.2, 0.85],
+  });
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={64}>
+    <View style={styles.page}>
       <View style={styles.header}>
-        <Text style={styles.title}>X Companion</Text>
-        <Text style={styles.companion}>Talking to X</Text>
-        <Text style={styles.subtitle}>{status}</Text>
-        <Text style={styles.url}>API: {API_BASE_URL}</Text>
-        <Text style={styles.urlSmall}>Voice: {CHAT_AUDIO_URL}</Text>
-        <Text style={styles.locationHint}>{locationLabel}</Text>
+        <View>
+          <Text style={styles.title}>AI Twin</Text>
+          <Text style={styles.subtitle}>Your Genius AI</Text>
+        </View>
+        <Pressable
+          onPress={() => void uploadPdf()}
+          style={({ pressed }) => [styles.pdfButton, pressed && styles.glow]}
+          disabled={isPdfUploading || isLoading}>
+          {isPdfUploading ? (
+            <ActivityIndicator color="#FF6B00" size="small" />
+          ) : (
+            <Text style={styles.pdfText}>📄</Text>
+          )}
+        </Pressable>
       </View>
 
       <FlatList
         ref={listRef}
         data={messages}
         keyExtractor={(item) => item.id}
-        style={styles.msgList}
-        contentContainerStyle={styles.msgListContent}
-        ListEmptyComponent={
-          <Text style={styles.empty}>No chat yet — type below or use voice.</Text>
-        }
+        style={styles.list}
+        contentContainerStyle={styles.listContent}
+        keyboardShouldPersistTaps="handled"
+        ListEmptyComponent={<Text style={styles.empty}>ابدأ المحادثة...</Text>}
+        ListFooterComponent={isTyping ? <ThinkingIndicator /> : null}
         renderItem={({ item }) => {
-          if (item.role === 'user') {
+          const isUser = item.role === 'user';
+          if (isUser) {
             return (
-              <View style={styles.rowUser}>
-                <View style={[styles.bubble, styles.bubbleUser]}>
-                  {item.imageUri ? (
-                    <Image
-                      source={{ uri: item.imageUri }}
-                      style={styles.thumb}
-                      resizeMode="cover"
-                    />
-                  ) : null}
-                  {item.text ? (
-                    <Text
-                      style={[
-                        styles.bubbleTextUser,
-                        item.imageUri ? { marginTop: 8 } : null,
-                      ]}>
-                      {item.text}
-                    </Text>
-                  ) : null}
+              <View style={[styles.row, styles.rowUser]}>
+                <View style={[styles.bubble, styles.userBubble]}>
+                  {item.imageUri ? <Image source={{ uri: item.imageUri }} style={styles.thumb} /> : null}
+                  <Text style={styles.message}>{item.text}</Text>
+                  <Text style={styles.time}>{formatTime(item.timestamp)}</Text>
                 </View>
               </View>
             );
           }
+          let avatarMode: GeniusAvatarMode = 'breathing';
+          if (item.id === lastAiMessageId && isSpeaking) {
+            avatarMode = 'speaking';
+          }
           return (
-            <View style={styles.rowAi}>
-              <View style={[styles.bubble, styles.bubbleAi]}>
-                <Text style={styles.bubbleTextAi}>{item.text}</Text>
+            <View style={[styles.row, styles.rowAi]}>
+              <View style={styles.aiRow}>
+                <GeniusAvatar mode={avatarMode} size={45} showLabel />
+                <View style={[styles.bubble, styles.aiBubble, styles.aiBubbleFlex]}>
+                  {item.imageUri ? <Image source={{ uri: item.imageUri }} style={styles.thumb} /> : null}
+                  <Text style={styles.message}>{item.text}</Text>
+                  <Text style={styles.time}>{formatTime(item.timestamp)}</Text>
+                </View>
               </View>
             </View>
           );
         }}
       />
 
-      {pendingImage ? (
-        <View style={styles.previewRow}>
-          <Image
-            source={{ uri: pendingImage.uri }}
-            style={styles.previewThumb}
-            resizeMode="cover"
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {pendingImage ? (
+          <View style={styles.previewRow}>
+            <Image source={{ uri: pendingImage.uri }} style={styles.previewThumb} />
+            <Pressable onPress={() => setPendingImage(null)} style={styles.clearBtn}>
+              <Text style={styles.clearText}>✕</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        <View style={styles.inputBar}>
+          <Pressable onPress={showImagePicker} style={styles.cameraBtn} disabled={isLoading}>
+            <Text style={styles.cameraIcon}>📷</Text>
+          </Pressable>
+          <TextInput
+            style={styles.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder="اكتب رسالتك..."
+            placeholderTextColor="#888888"
+            onSubmitEditing={() => void sendMessage()}
+            editable={!isLoading}
+            multiline
           />
-          <Pressable onPress={() => setPendingImage(null)} style={styles.previewClear}>
-            <Text style={styles.previewClearText}>✕</Text>
+          <Pressable
+            onPress={() => void sendMessage()}
+            style={({ pressed }) => [
+              styles.sendBtn,
+              pressed && styles.glow,
+              isLoading && styles.disabled,
+            ]}
+            disabled={isLoading || (!input.trim() && !pendingImage)}>
+            {isLoading ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Text style={styles.sendIcon}>➤</Text>
+            )}
           </Pressable>
         </View>
-      ) : null}
 
-      <View style={styles.composer}>
-        <Pressable
-          style={[styles.camBtn, isLoading && styles.btnDisabled]}
-          onPress={showImageOptions}
-          disabled={isLoading}
-          accessibilityLabel="Image picker">
-          <Text style={styles.camBtnText}>📷</Text>
-        </Pressable>
-        <TextInput
-          style={styles.input}
-          value={textDraft}
-          onChangeText={setTextDraft}
-          placeholder="Message (optional with image)…"
-          placeholderTextColor="#999"
-          editable={!isLoading}
-          multiline
-          maxLength={4000}
-        />
-        <Pressable
-          style={[styles.sendBtn, sendDisabled && styles.btnDisabled]}
-          onPress={() => void sendComposer()}
-          disabled={sendDisabled}>
-          {isLoading ? (
-            <ActivityIndicator color="#fff" size="small" />
-          ) : (
-            <Text style={styles.sendBtnText}>Send</Text>
-          )}
-        </Pressable>
-      </View>
-
-      <Pressable
-        style={[
-          styles.button,
-          isRecording ? styles.buttonStop : styles.buttonStart,
-          isLoading && styles.btnDisabled,
-        ]}
-        onPress={() => void onRecordPress()}
-        disabled={isLoading}>
-        <Text style={styles.buttonText}>
-          {isLoading
-            ? 'Working...'
-            : isRecording
-              ? 'Stop Recording'
-              : 'Start Recording'}
-        </Text>
-      </Pressable>
-
-      <View style={styles.box}>
-        <Text style={styles.boxLabel}>Last voice transcript</Text>
-        <Text style={styles.boxText}>{transcript || '—'}</Text>
-      </View>
-      <View style={styles.box}>
-        <Text style={styles.boxLabel}>Last voice reply</Text>
-        <Text style={styles.boxText}>{reply || '—'}</Text>
-      </View>
-      <View style={styles.box}>
-        <Text style={styles.boxLabel}>Memory</Text>
-        <Text style={styles.boxText}>{memoryHint || '—'}</Text>
-      </View>
-
-      <NearbyPlaceChips places={nearbySuggestions} nearbySource={nearbySource} />
-    </KeyboardAvoidingView>
+        <View style={styles.micWrap}>
+          <Pressable
+            onPressIn={() => {
+              animateMicPress(0.96);
+              void startRecording();
+            }}
+            onPressOut={() => {
+              animateMicPress(1);
+              void stopRecordingAndAsk();
+            }}
+            disabled={isLoading || isPdfUploading}
+            style={styles.micPress}>
+            <Animated.View
+              style={[
+                styles.micShell,
+                styles.glow,
+                {
+                  transform: [{ scale: pressScaleAnim }],
+                },
+              ]}>
+              {isRecording ? (
+                <Animated.View
+                  style={[
+                    styles.recordPulse,
+                    {
+                      transform: [{ scale: pulseScale }],
+                      opacity: pulseOpacity,
+                    },
+                  ]}
+                />
+              ) : null}
+              <LinearGradient
+                colors={['#FF6B00', '#FF8C3A']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.micBtn}>
+                <Text style={styles.micIcon}>🎤</Text>
+              </LinearGradient>
+            </Animated.View>
+          </Pressable>
+          <Text style={[styles.holdLabel, isRecording && styles.recordingLabel]}>
+            {isRecording ? 'جاري التسجيل...' : 'اضغط مطولاً للتسجيل'}
+          </Text>
+        </View>
+      </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
+  page: {
     flex: 1,
-    backgroundColor: '#fff',
-    padding: 16,
-    paddingTop: 48,
+    backgroundColor: '#0A0A0A',
   },
   header: {
-    marginBottom: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 56,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2A2A2A',
+    backgroundColor: '#0A0A0A',
   },
   title: {
-    fontSize: 24,
-    fontWeight: '700',
-  },
-  companion: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1f4f8f',
+    color: '#FFFFFF',
+    fontSize: 26,
+    fontWeight: '800',
   },
   subtitle: {
+    color: '#FF6B00',
     fontSize: 14,
-    color: '#444',
-    marginTop: 4,
-  },
-  url: {
-    fontSize: 11,
-    color: '#888',
-    marginTop: 4,
-  },
-  urlSmall: {
-    fontSize: 10,
-    color: '#aaa',
-  },
-  locationHint: {
-    fontSize: 11,
-    color: '#2e7d32',
     marginTop: 2,
+    fontWeight: '600',
   },
-  msgList: {
+  pdfButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pdfText: {
+    fontSize: 20,
+  },
+  list: {
     flex: 1,
-    maxHeight: 280,
   },
-  msgListContent: {
+  listContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 14,
     paddingBottom: 8,
-    flexGrow: 1,
   },
   empty: {
-    color: '#999',
+    color: '#FFFFFF',
     textAlign: 'center',
-    marginTop: 16,
+    marginTop: 40,
+    fontSize: 15,
+  },
+  row: {
+    marginBottom: 10,
   },
   rowUser: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginBottom: 8,
+    alignItems: 'flex-end',
   },
   rowAi: {
-    flexDirection: 'row',
-    justifyContent: 'flex-start',
-    marginBottom: 8,
+    alignItems: 'flex-start',
   },
   bubble: {
-    maxWidth: '88%',
-    padding: 12,
+    maxWidth: '82%',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderRadius: 16,
   },
-  bubbleUser: {
-    backgroundColor: '#111',
-    borderBottomRightRadius: 4,
+  userBubble: {
+    backgroundColor: '#FF6B00',
+    borderBottomRightRadius: 5,
   },
-  bubbleAi: {
-    backgroundColor: '#e8eef9',
-    borderBottomLeftRadius: 4,
+  aiBubble: {
+    backgroundColor: '#1A1A1A',
+    borderBottomLeftRadius: 5,
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
   },
-  bubbleTextUser: {
+  aiRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    maxWidth: '96%',
+    gap: 8,
+  },
+  aiBubbleFlex: {
+    flexShrink: 1,
+    maxWidth: '78%',
+  },
+  message: {
+    color: '#FFFFFF',
     fontSize: 15,
-    color: '#fff',
     lineHeight: 21,
   },
-  bubbleTextAi: {
-    fontSize: 15,
-    color: '#111',
-    lineHeight: 21,
+  time: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    marginTop: 6,
+    alignSelf: 'flex-end',
+    opacity: 0.82,
   },
   thumb: {
-    width: 160,
+    width: 170,
     height: 130,
-    borderRadius: 12,
-    backgroundColor: '#333',
+    borderRadius: 10,
+    marginBottom: 8,
   },
   previewRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    backgroundColor: '#141414',
   },
   previewThumb: {
     width: 56,
     height: 56,
     borderRadius: 8,
-    backgroundColor: '#eee',
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
   },
-  previewClear: {
-    padding: 8,
-    backgroundColor: '#f5f5f5',
-    borderRadius: 8,
-  },
-  previewClearText: {
-    fontSize: 14,
-    color: '#666',
-    fontWeight: '700',
-  },
-  composer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 8,
-    marginBottom: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#eee',
-    paddingTop: 10,
-  },
-  camBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: '#f5f5f5',
+  clearBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#1A1A1A',
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: '#2A2A2A',
   },
-  camBtnText: {
-    fontSize: 20,
+  clearText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  inputBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1A1A1A',
+    borderTopWidth: 1,
+    borderTopColor: '#2A2A2A',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  cameraBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#0A0A0A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraIcon: {
+    color: '#FFFFFF',
+    fontSize: 18,
   },
   input: {
     flex: 1,
-    minHeight: 44,
-    maxHeight: 100,
+    color: '#FFFFFF',
+    backgroundColor: '#0A0A0A',
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 12,
+    borderColor: '#2A2A2A',
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 16,
+    paddingVertical: 9,
+    fontSize: 15,
+    maxHeight: 120,
   },
   sendBtn: {
-    backgroundColor: '#111',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
-    minWidth: 72,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#FF6B00',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendBtnText: {
-    color: '#fff',
+  sendIcon: {
+    color: '#FFFFFF',
+    fontSize: 18,
     fontWeight: '700',
   },
-  btnDisabled: {
-    opacity: 0.55,
-  },
-  button: {
-    minWidth: 220,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 10,
+  micWrap: {
     alignItems: 'center',
-    alignSelf: 'center',
-    marginBottom: 12,
+    backgroundColor: '#0A0A0A',
+    paddingBottom: 16,
+    paddingTop: 8,
   },
-  buttonStart: {
-    backgroundColor: '#111',
+  micPress: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  buttonStop: {
-    backgroundColor: '#b00020',
+  micShell: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
+  micBtn: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micIcon: {
+    fontSize: 34,
+    color: '#FFFFFF',
+  },
+  recordPulse: {
+    position: 'absolute',
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    backgroundColor: '#EF4444',
+  },
+  holdLabel: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#FF6B00',
     fontWeight: '600',
   },
-  box: {
-    width: '100%',
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 10,
-    padding: 12,
-    backgroundColor: '#fafafa',
-    marginBottom: 8,
+  recordingLabel: {
+    color: '#EF4444',
   },
-  boxLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 6,
+  glow: {
+    shadowColor: '#FF6B00',
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
   },
-  boxText: {
-    fontSize: 15,
-    color: '#222',
+  disabled: {
+    opacity: 0.55,
   },
 });

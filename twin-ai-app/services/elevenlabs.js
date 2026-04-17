@@ -4,6 +4,13 @@ import { textToSpeech } from './api';
 /** Antoni — smooth, confident male (ElevenLabs) */
 const ELEVENLABS_VOICE_ID = 'ErXwobaYiN019PkySvjV';
 
+const VOICE_SETTINGS = {
+  stability: 0.3,
+  similarity_boost: 0.9,
+  style: 0.5,
+  use_speaker_boost: true,
+};
+
 function toBase64(buffer) {
   const binary = new Uint8Array(buffer).reduce(
     (data, byte) => data + String.fromCharCode(byte),
@@ -28,9 +35,33 @@ function toBase64(buffer) {
   return output;
 }
 
+/**
+ * Play at maximum system volume: expo-av volume 1.0, full rate, unmuted.
+ * @param {string} uri
+ * @returns {Promise<import('expo-av').Audio.Sound>}
+ */
 async function playFromUri(uri) {
-  const { sound } = await Audio.Sound.createAsync({ uri });
+  await Audio.setAudioModeAsync({
+    playsInSilentModeIOS: true,
+    allowsRecordingIOS: false,
+    staysActiveInBackground: false,
+    shouldDuckAndroid: true,
+    playThroughEarpieceAndroid: false,
+  });
+
+  const initialStatus = {
+    shouldPlay: false,
+    volume: 1.0,
+    rate: 1.0,
+    isMuted: false,
+  };
+
+  const { sound } = await Audio.Sound.createAsync({ uri }, initialStatus);
+  await sound.setVolumeAsync(1.0);
+  await sound.setRateAsync(1.0, true);
+  await sound.setIsMutedAsync(false);
   await sound.playAsync();
+  return sound;
 }
 
 async function playFromElevenLabsBlob(blob) {
@@ -45,17 +76,32 @@ async function playFromElevenLabsBlob(blob) {
     const base64 = toBase64(arrayBuffer);
     uri = `data:audio/mpeg;base64,${base64}`;
   }
-  await playFromUri(uri);
+  return playFromUri(uri);
 }
 
 /**
  * Speak text: ElevenLabs (Antoni) first, then backend POST /tts via `textToSpeech`.
+ * The fallback /tts call is intentionally unauthenticated for local development.
+ *
+ * @param {string} text
+ * @param {{ onPlaybackStart?: () => void; onPlaybackEnd?: () => void }} [callbacks]
  */
-export async function speak(text) {
+export async function speak(text, callbacks = {}) {
+  const { onPlaybackStart, onPlaybackEnd } = callbacks;
   const trimmed = String(text ?? '').trim();
   if (!trimmed) return;
 
   const apiKey = process.env.EXPO_PUBLIC_ELEVENLABS_API_KEY?.trim();
+
+  const attachEndListener = (sound) => {
+    sound.setOnPlaybackStatusUpdate((status) => {
+      if (!status.isLoaded) return;
+      if (status.didJustFinish) {
+        onPlaybackEnd?.();
+        void sound.unloadAsync().catch(() => {});
+      }
+    });
+  };
 
   if (apiKey) {
     try {
@@ -70,13 +116,16 @@ export async function speak(text) {
           body: JSON.stringify({
             text: trimmed,
             model_id: 'eleven_multilingual_v2',
+            voice_settings: VOICE_SETTINGS,
           }),
         },
       );
 
       if (response.ok) {
         const blob = await response.blob();
-        await playFromElevenLabsBlob(blob);
+        onPlaybackStart?.();
+        const sound = await playFromElevenLabsBlob(blob);
+        attachEndListener(sound);
         return;
       }
       const detail = await response.text();
@@ -89,7 +138,9 @@ export async function speak(text) {
   try {
     const payload = await textToSpeech(trimmed, 'X');
     const uri = `data:${payload.audioMimeType};base64,${payload.audioBase64}`;
-    await playFromUri(uri);
+    onPlaybackStart?.();
+    const sound = await playFromUri(uri);
+    attachEndListener(sound);
   } catch (error) {
     console.error('[tts] fallback failed', error);
     throw error;
