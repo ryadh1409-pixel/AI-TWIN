@@ -6,6 +6,8 @@ import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import 'react-native-reanimated';
 
+import { ProactiveLaunchPing } from '@/components/ProactiveLaunchPing';
+import { SmartCompanionNotifications } from '@/components/SmartCompanionNotifications';
 import { useAuth } from '@/contexts/AuthContext';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { useColorScheme } from '@/hooks/use-color-scheme';
@@ -100,6 +102,8 @@ export default function RootLayout() {
       <RescheduleDailyNotifications />
       <NotificationOpenChat />
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <SmartCompanionNotifications />
+        <ProactiveLaunchPing />
         <Stack>
           <Stack.Screen name="index" options={{ headerShown: false }} />
           <Stack.Screen name="setup" options={{ headerShown: false }} />

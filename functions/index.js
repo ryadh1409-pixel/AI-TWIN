@@ -1,6 +1,11 @@
 const { onRequest } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
+const { FieldValue } = require("firebase-admin/firestore");
+const { summarizeSaudiNewsArabic, generateAbbasidSleepStory } = require("./services/openaiService");
+const { fetchSaudiGoogleNewsText } = require("./services/newsService");
+const { notifyDailyReportPlaceholder } = require("./services/pushService");
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -273,4 +278,78 @@ exports.tts = onRequest(
     invoker: "public",
   },
   ttsApp,
+);
+
+/** X7 AI Twin — daily Saudi news digest → Firestore `daily_reports` (21:00 America/Toronto) */
+exports.dailyNewsDigest = onSchedule(
+  {
+    schedule: "0 21 * * *",
+    timeZone: "America/Toronto",
+    secrets: [openaiApiKey],
+    timeoutSeconds: 300,
+    memory: "512MiB",
+  },
+  async () => {
+    const apiKey = openaiApiKey.value();
+    if (!apiKey) {
+      console.error("[dailyNewsDigest] OPENAI_API_KEY missing");
+      return;
+    }
+    try {
+      const raw = await fetchSaudiGoogleNewsText();
+      const content = await summarizeSaudiNewsArabic(apiKey, raw);
+      const ref = await admin.firestore().collection("daily_reports").add({
+        type: "news",
+        content,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      await notifyDailyReportPlaceholder({ reportId: ref.id, type: "news" });
+      console.log("[dailyNewsDigest] saved", ref.id);
+    } catch (err) {
+      console.error("[dailyNewsDigest]", err?.message || err);
+      throw err;
+    }
+  },
+);
+
+const sleepStoryApp = express();
+sleepStoryApp.disable("x-powered-by");
+sleepStoryApp.use(cors({ origin: true }));
+sleepStoryApp.options("*", cors({ origin: true }));
+sleepStoryApp.use(express.json({ limit: "256kb" }));
+
+async function sleepStoryHandler(req, res) {
+  try {
+    const apiKey = openaiApiKey.value();
+    if (!apiKey) {
+      return res.status(500).json({ error: "Missing OpenAI configuration." });
+    }
+    const story = await generateAbbasidSleepStory(apiKey);
+    return res.status(200).json({
+      story,
+      model: process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
+    });
+  } catch (err) {
+    console.error("sleep-story:", err);
+    return res.status(500).json({ error: err?.message || "sleep-story failed" });
+  }
+}
+
+sleepStoryApp.post("/sleep-story", sleepStoryHandler);
+sleepStoryApp.post("/", sleepStoryHandler);
+sleepStoryApp.use((req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
+/** POST /sleep-story — Abbasid-era bedtime story in Arabic (X7 tone) */
+exports.sleepStory = onRequest(
+  {
+    secrets: [openaiApiKey],
+    cors: true,
+    timeoutSeconds: 120,
+    memory: "512MiB",
+    maxInstances: 15,
+    invoker: "public",
+  },
+  sleepStoryApp,
 );

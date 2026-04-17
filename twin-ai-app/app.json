@@ -23,11 +23,24 @@
     "plugins": [
       "expo-router",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow the app to use your location so X can give nearby suggestions."
+        }
+      ],
+      [
         "expo-notifications",
         {
           "color": "#111111",
           "sounds": [],
           "defaultChannel": "default"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos to share images with the AI Twin.",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera for the AI Twin."
         }
       ]
     ],

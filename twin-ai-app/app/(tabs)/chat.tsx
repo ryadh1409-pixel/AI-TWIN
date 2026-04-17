@@ -1,7 +1,14 @@
+import { NearbyPlaceChips } from '@/components/NearbyPlaceChips';
 import { useAuth } from '@/contexts/AuthContext';
 import { isFirebaseConfigured } from '@/lib/firebase';
 import { playBase64Mp3 } from '@/services/audioPlayback';
-import { sendChatMessage, CHAT_URL, synthesizeSpeech, TTS_URL } from '@/services/api';
+import {
+  sendChatMessage,
+  CHAT_URL,
+  synthesizeSpeech,
+  TTS_URL,
+  type NearbyPlaceSuggestion,
+} from '@/services/api';
 import {
   subscribeMessages,
   type FamilyMessage,
@@ -90,6 +97,8 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<(MomDadMessage | FamilyMessage)[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [lastNearby, setLastNearby] = useState<NearbyPlaceSuggestion[]>([]);
+  const [lastNearbySource, setLastNearbySource] = useState<string | undefined>();
 
   useEffect(() => {
     const c = params.character;
@@ -130,6 +139,8 @@ export default function ChatScreen() {
         /* keep */
       }
       const result = await sendChatMessage(token, character, text);
+      setLastNearby(result.nearbySuggestions ?? []);
+      setLastNearbySource(result.nearbySource);
       if (character !== 'family' && 'reply' in result) {
         const payload =
           result.audio ??
@@ -261,6 +272,8 @@ export default function ChatScreen() {
           <Text style={styles.empty}>No messages yet. Say hello below.</Text>
         }
       />
+
+      <NearbyPlaceChips places={lastNearby} nearbySource={lastNearbySource} />
 
       <View style={styles.inputRow}>
         <TextInput

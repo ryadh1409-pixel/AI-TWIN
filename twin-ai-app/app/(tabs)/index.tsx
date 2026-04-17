@@ -1,88 +1,69 @@
-/**
- * My Family AI — set EXPO_PUBLIC_* URLs and Firebase keys in .env.
- * Restart Expo: npx expo start -c
- */
-
 import { useAuth } from '@/contexts/AuthContext';
 import { isFirebaseConfigured } from '@/lib/firebase';
 import {
-  CHAT_URL,
-  sendChatMessage,
-  synthesizeSpeech,
-  transcribeAudio,
-  TTS_URL,
-  TRANSCRIBE_URL,
+  askTwinRag,
+  askTwinVision,
+  sendAudio,
+  uploadTwinPdf,
+  type VoicePerson,
 } from '@/services/api';
-import { playBase64Mp3 } from '@/services/audioPlayback';
-import type { Character } from '@/services/userFirestore';
+import { speak } from '@/services/elevenlabs';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   Image,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Audio } from 'expo-av';
+import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-const PERSONA_CARDS: {
-  key: Exclude<Character, 'family'>;
-  label: string;
-  title: string;
-  image: any;
-}[] = [
-  {
-    key: 'mom',
-    label: 'Micheal (Mom)',
-    title: 'أمك دايم معاك 🤍',
-    image: require('../../assets/avatars/mom.jpg'),
-  },
-  {
-    key: 'dad',
-    label: 'Colonel (Dad)',
-    title: 'العقيد - وزارة الداخلية 🎖️',
-    image: require('../../assets/avatars/dad.jpeg'),
-  },
-  {
-    key: 'maher',
-    label: 'Maher (Friend)',
-    title: 'دكتور ICU - صاحبك الصريح 💪',
-    image: require('../../assets/avatars/maher.png'),
-  },
-  {
-    key: 'mjeed',
-    label: 'Mjeed (Brother)',
-    title: 'دكتور أطفال - أخوك المجنون ⚽',
-    image: require('../../assets/avatars/mjeed.png'),
-  },
-];
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'ai';
+  text: string;
+  timestamp: number;
+  imageUri?: string;
+};
+
+type PendingImage = {
+  uri: string;
+  mimeType: string;
+  fileName: string;
+};
+
+const MAX_MESSAGES = 20;
 
 export default function HomeScreen() {
-  const { user, loading: authLoading, idToken, refreshIdToken } = useAuth();
-  const [mode, setMode] = useState<Character>('mom');
-  const [isRecording, setIsRecording] = useState(false);
+  const { user, loading: authLoading } = useAuth();
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [textDraft, setTextDraft] = useState('');
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [statusText, setStatusText] = useState('Idle');
-  const [transcript, setTranscript] = useState('');
-  const [replyMomDad, setReplyMomDad] = useState('');
-  const [replyFamily, setReplyFamily] = useState<{
-    mom: string;
-    dad: string;
-    maher: string;
-    mjeed: string;
-  } | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPdfUploading, setIsPdfUploading] = useState(false);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const listRef = useRef<FlatList<ChatMessage>>(null);
+
+  useEffect(() => {
+    listRef.current?.scrollToEnd({ animated: true });
+  }, [messages.length]);
 
   useEffect(() => {
     return () => {
       void (async () => {
         try {
-          if (recordingRef.current) {
-            await recordingRef.current.stopAndUnloadAsync();
-          }
+          if (recordingRef.current) await recordingRef.current.stopAndUnloadAsync();
         } catch {
           /* ignore */
         }
@@ -90,407 +71,531 @@ export default function HomeScreen() {
     };
   }, []);
 
-  const startRecording = async () => {
-    if (isLoading || authLoading) return;
-    if (!isFirebaseConfigured() || !user) {
-      Alert.alert(
-        'Firebase',
-        'Add Firebase config to .env and restart Expo (see .env.example).',
-      );
-      return;
-    }
+  const pushMessage = (role: 'user' | 'ai', text: string, imageUri?: string) => {
+    const msg: ChatMessage = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      role,
+      text,
+      timestamp: Date.now(),
+      ...(imageUri ? { imageUri } : {}),
+    };
+    setMessages((prev) => [...prev, msg].slice(-MAX_MESSAGES));
+  };
+
+  const formatTime = (timestamp: number) => {
     try {
-      const perm = await Audio.requestPermissionsAsync();
-      if (perm.status !== 'granted') {
-        Alert.alert(
-          'Permission denied',
-          'Microphone access is required to record audio.',
-        );
-        return;
-      }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      return new Date(timestamp).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
       });
-
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
-      );
-      recordingRef.current = recording;
-      setIsRecording(true);
-      setStatusText('Recording...');
-      setReplyMomDad('');
-      setReplyFamily(null);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to start recording';
-      Alert.alert('Recording error', message);
-      setIsRecording(false);
-      setStatusText('Idle');
+    } catch {
+      return '';
     }
   };
 
-  const stopAndSend = async () => {
-    const recording = recordingRef.current;
-    if (!recording || !isRecording) {
-      Alert.alert('Not recording', 'Tap Start Recording first.');
-      return;
+  const speakWithFallback = async (text: string, _person: VoicePerson) => {
+    try {
+      await speak(text);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      Alert.alert('Voice error', msg);
     }
-    if (!user || !idToken) {
-      Alert.alert('Sign-in', 'Wait for Firebase to finish signing you in.');
-      return;
-    }
-    if (!TRANSCRIBE_URL || !CHAT_URL) {
-      Alert.alert(
-        'Config',
-        'Set EXPO_PUBLIC_TRANSCRIBE_URL and EXPO_PUBLIC_CHAT_URL in .env.',
-      );
-      return;
-    }
+  };
 
-    setIsLoading(true);
-    setIsRecording(false);
-    setStatusText('Uploading audio...');
+  const pickImage = async (source: 'library' | 'camera') => {
+    try {
+      if (source === 'library') {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (perm.status !== 'granted') {
+          Alert.alert('Permission', 'Photo library access is required.');
+          return;
+        }
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.9,
+        });
+        if (result.canceled || !result.assets[0]) return;
+        const a = result.assets[0];
+        setPendingImage({
+          uri: a.uri,
+          mimeType: a.mimeType ?? 'image/jpeg',
+          fileName: a.fileName ?? 'photo.jpg',
+        });
+      } else {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (perm.status !== 'granted') {
+          Alert.alert('Permission', 'Camera access is required.');
+          return;
+        }
+        const result = await ImagePicker.launchCameraAsync({ quality: 0.9 });
+        if (result.canceled || !result.assets[0]) return;
+        const a = result.assets[0];
+        setPendingImage({
+          uri: a.uri,
+          mimeType: a.mimeType ?? 'image/jpeg',
+          fileName: a.fileName ?? 'photo.jpg',
+        });
+      }
+    } catch (error) {
+      Alert.alert('Image', error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const openImagePicker = () => {
+    Alert.alert('Attach image', 'Choose source', [
+      { text: 'Photo Library', onPress: () => void pickImage('library') },
+      { text: 'Take Photo', onPress: () => void pickImage('camera') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
+
+  const pickAndUploadPdf = async () => {
+    if (authLoading || !user || !isFirebaseConfigured()) {
+      Alert.alert('Firebase', 'Firebase is not ready yet.');
+      return;
+    }
+    if (isPdfUploading || isLoading) return;
 
     try {
-      await recording.stopAndUnloadAsync();
-      recordingRef.current = null;
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const file = result.assets?.[0];
+      if (!file?.uri) return;
 
-      const uri = recording.getURI();
-      if (!uri) {
-        Alert.alert('Error', 'Could not read recording file.');
-        setStatusText('Idle');
-        return;
-      }
-
-      const { text } = await transcribeAudio(uri);
-      setTranscript(text);
-      setStatusText('Getting reply...');
-
-      let token = idToken;
-      try {
-        token = (await refreshIdToken()) ?? idToken;
-      } catch {
-        /* use previous */
-      }
-
-      const result = await sendChatMessage(token, mode, text);
-      if (
-        mode === 'family' &&
-        'mom' in result &&
-        'maher' in result &&
-        'mjeed' in result
-      ) {
-        setReplyFamily({
-          mom: result.mom,
-          dad: result.dad,
-          maher: result.maher,
-          mjeed: result.mjeed,
-        });
-        setReplyMomDad('');
-      } else if ('reply' in result) {
-        setReplyMomDad(result.reply);
-        setReplyFamily(null);
-        if (mode !== 'family') {
-          const ttsPayload =
-            result.audio ??
-            (TTS_URL
-              ? await synthesizeSpeech(
-                  token,
-                  mode as Exclude<Character, 'family'>,
-                  result.reply,
-                )
-              : null);
-          if (ttsPayload?.audioBase64) {
-            await playBase64Mp3(ttsPayload.audioBase64);
-          }
-        }
-      }
-      setStatusText('Done');
+      setIsPdfUploading(true);
+      const out = await uploadTwinPdf(user.uid, {
+        uri: file.uri,
+        name: file.name,
+        mimeType: file.mimeType ?? 'application/pdf',
+      });
+      Alert.alert('PDF Uploaded', `Indexed ${out.chunks} chunk(s).`);
     } catch (error) {
-      console.error('stopAndSend failed:', error);
-      const raw =
-        error instanceof Error ? error.message : String(error ?? 'Unknown error');
-      Alert.alert('Something went wrong', raw);
-      setStatusText('Idle');
+      Alert.alert('PDF upload failed', error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsPdfUploading(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    const q = textDraft.trim();
+    const img = pendingImage;
+    if (!user || authLoading) return;
+    if (!q && !img) return;
+    if (!isFirebaseConfigured()) {
+      Alert.alert('Firebase', 'Add Firebase config to .env and restart Expo.');
+      return;
+    }
+
+    setTextDraft('');
+    setPendingImage(null);
+    pushMessage('user', q, img?.uri);
+    setIsLoading(true);
+    try {
+      if (img) {
+        const { answer } = await askTwinVision(
+          user.uid,
+          { uri: img.uri, name: img.fileName, mimeType: img.mimeType },
+          q || undefined,
+        );
+        pushMessage('ai', answer);
+      } else {
+        const { answer } = await askTwinRag(user.uid, q);
+        pushMessage('ai', answer);
+      }
+    } catch (error) {
+      Alert.alert('Send failed', error instanceof Error ? error.message : String(error));
     } finally {
       setIsLoading(false);
     }
   };
 
-  const startDisabled = isRecording || isLoading || authLoading;
-  const stopDisabled = !isRecording || isLoading || authLoading;
+  const startRecording = async () => {
+    if (isLoading || authLoading || isPdfUploading) return;
+    if (!isFirebaseConfigured() || !user) {
+      Alert.alert('Firebase', 'Firebase is not ready yet.');
+      return;
+    }
+    try {
+      const perm = await Audio.requestPermissionsAsync();
+      if (perm.status !== 'granted') {
+        Alert.alert('Permission', 'Microphone access is required.');
+        return;
+      }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY,
+      );
+      recordingRef.current = recording;
+      setIsRecording(true);
+    } catch (error) {
+      Alert.alert('Recording error', error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const stopAndSendVoice = async () => {
+    const recording = recordingRef.current;
+    if (!recording || !isRecording || !user) return;
+
+    setIsRecording(false);
+    setIsLoading(true);
+    try {
+      await recording.stopAndUnloadAsync();
+      recordingRef.current = null;
+      const uri = recording.getURI();
+      if (!uri) return;
+
+      const formData = new FormData();
+      formData.append('file', {
+        uri,
+        name: 'audio.m4a',
+        type: 'audio/m4a',
+      } as any);
+
+      const { text } = await sendAudio(formData, 'X');
+      const transcript = text.trim();
+      if (!transcript) return;
+
+      pushMessage('user', transcript);
+      const { answer } = await askTwinRag(user.uid, transcript);
+      pushMessage('ai', answer);
+      await speakWithFallback(answer, 'X');
+    } catch (error) {
+      Alert.alert('Voice ask failed', error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>My Family AI</Text>
-      <Text style={styles.tagline}>
-        Mom · Dad · Maher · Mjeed · Family chat
-      </Text>
-
-      <Text style={styles.sectionLabel}>Who answers</Text>
-      <View style={styles.cardGrid}>
-        {PERSONA_CARDS.map((m) => (
+    <SafeAreaView style={styles.page}>
+      <KeyboardAvoidingView
+        style={styles.page}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={80}>
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.headerTitle}>AI Twin</Text>
+            <Text style={styles.headerSubtitle}>Your Genius AI</Text>
+          </View>
           <Pressable
-            key={m.key}
-            style={[
-              styles.personaCard,
-              mode === m.key && styles.modeChipActive,
-            ]}
-            onPress={() => setMode(m.key)}>
-            <Image source={m.image} style={styles.personaImage} />
-            <Text style={[styles.personaName, mode === m.key && styles.modeChipTextActive]}>
-              {m.label}
-            </Text>
-            <Text style={styles.personaTitle}>{m.title}</Text>
+            style={({ pressed }) => [styles.pdfButton, pressed && styles.glowOrange]}
+            onPress={() => void pickAndUploadPdf()}
+            disabled={isPdfUploading || isLoading}>
+            {isPdfUploading ? (
+              <ActivityIndicator color="#FF6B00" size="small" />
+            ) : (
+              <Text style={styles.pdfButtonText}>📄</Text>
+            )}
           </Pressable>
-        ))}
-      </View>
-      <Pressable
-        style={[styles.familyCard, mode === 'family' && styles.modeChipActive]}
-        onPress={() => setMode('family')}>
-        <Text style={[styles.familyTitle, mode === 'family' && styles.modeChipTextActive]}>
-          👨‍👩‍👧 Family mode
-        </Text>
-      </Pressable>
+        </View>
 
-      <Text style={styles.hint} numberOfLines={2}>
-        {!TRANSCRIBE_URL || !CHAT_URL
-          ? 'Set EXPO_PUBLIC_TRANSCRIBE_URL and EXPO_PUBLIC_CHAT_URL'
-          : !TTS_URL
-            ? 'Optional: set EXPO_PUBLIC_TTS_URL for explicit TTS endpoint'
-          : 'Ready'}
-      </Text>
-      <Text style={styles.subtitle}>{statusText}</Text>
-      {isLoading ? (
-        <ActivityIndicator style={styles.spinner} size="small" />
-      ) : null}
-      <Pressable
-        style={({ pressed }) => [
-          styles.button,
-          styles.buttonPrimary,
-          startDisabled && styles.buttonDisabled,
-          pressed && !startDisabled && styles.buttonPressed,
-        ]}
-        onPress={startRecording}
-        disabled={startDisabled}>
-        <Text style={styles.buttonText}>🎙️ Start Recording</Text>
-      </Pressable>
-      <Pressable
-        style={({ pressed }) => [
-          styles.button,
-          styles.buttonSecondary,
-          stopDisabled && styles.buttonDisabled,
-          pressed && !stopDisabled && styles.buttonPressed,
-        ]}
-        onPress={stopAndSend}
-        disabled={stopDisabled}>
-        <Text style={styles.buttonTextDark}>⏹️ Stop & send to AI</Text>
-      </Pressable>
+        <FlatList
+          ref={listRef}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          keyboardShouldPersistTaps="handled"
+          ListEmptyComponent={
+            <Text style={styles.emptyText}>Start chatting with your AI Twin</Text>
+          }
+          renderItem={({ item }) => {
+            const isUser = item.role === 'user';
+            return (
+              <View style={[styles.row, isUser ? styles.rowUser : styles.rowAi]}>
+                <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
+                  {item.imageUri ? (
+                    <Image source={{ uri: item.imageUri }} style={styles.imageThumb} />
+                  ) : null}
+                  {item.text ? <Text style={styles.messageText}>{item.text}</Text> : null}
+                  <Text style={styles.timestampText}>{formatTime(item.timestamp)}</Text>
+                </View>
+              </View>
+            );
+          }}
+        />
 
-      <Text style={styles.sectionLabel}>Transcript</Text>
-      <ScrollView
-        style={styles.transcriptBox}
-        contentContainerStyle={styles.transcriptContent}>
-        <Text style={styles.transcriptText}>
-          {transcript || 'Your speech-to-text will show here.'}
-        </Text>
-      </ScrollView>
+        <View style={styles.inputArea}>
+          {pendingImage ? (
+            <View style={styles.previewRow}>
+              <Image source={{ uri: pendingImage.uri }} style={styles.previewThumb} />
+              <Pressable
+                onPress={() => setPendingImage(null)}
+                style={({ pressed }) => [styles.clearImageButton, pressed && styles.glowOrange]}>
+                <Text style={styles.clearImageText}>✕</Text>
+              </Pressable>
+            </View>
+          ) : null}
 
-      <Text style={styles.sectionLabel}>Reply</Text>
-      <ScrollView
-        style={styles.replyBox}
-        contentContainerStyle={styles.transcriptContent}>
-        {replyFamily ? (
-          <>
-            <Text style={styles.familyLabel}>Mom</Text>
-            <Text style={styles.transcriptText}>{replyFamily.mom}</Text>
-            <Text style={[styles.familyLabel, { marginTop: 12 }]}>Dad</Text>
-            <Text style={styles.transcriptText}>{replyFamily.dad}</Text>
-            <Text style={[styles.familyLabel, { marginTop: 12 }]}>Maher</Text>
-            <Text style={styles.transcriptText}>{replyFamily.maher}</Text>
-            <Text style={[styles.familyLabel, { marginTop: 12 }]}>Mjeed</Text>
-            <Text style={styles.transcriptText}>{replyFamily.mjeed}</Text>
-          </>
-        ) : (
-          <Text style={styles.transcriptText}>
-            {replyMomDad || 'AI replies will show here after you record.'}
-          </Text>
-        )}
-      </ScrollView>
-    </View>
+          <View style={styles.inputBar}>
+            <Pressable
+              onPress={openImagePicker}
+              style={({ pressed }) => [styles.cameraButton, pressed && styles.glowOrange]}
+              disabled={isLoading}>
+              <Text style={styles.cameraText}>📷</Text>
+            </Pressable>
+
+            <TextInput
+              style={styles.input}
+              value={textDraft}
+              onChangeText={setTextDraft}
+              placeholder="Type your message..."
+              placeholderTextColor="#888888"
+              editable={!isLoading}
+              multiline
+              maxLength={4000}
+            />
+
+            <Pressable
+              onPress={() => void sendMessage()}
+              disabled={isLoading || (!textDraft.trim() && !pendingImage)}
+              style={({ pressed }) => [
+                styles.sendButton,
+                (pressed || isLoading) && styles.glowOrange,
+                (!textDraft.trim() && !pendingImage) && styles.disabled,
+              ]}>
+              {isLoading ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.sendText}>➤</Text>
+              )}
+            </Pressable>
+          </View>
+
+          <Pressable
+            onPressIn={() => void startRecording()}
+            onPressOut={() => void stopAndSendVoice()}
+            disabled={isLoading || isPdfUploading}
+            style={({ pressed }) => [styles.micWrap, (pressed || isRecording) && styles.glowOrange]}>
+            <LinearGradient
+              colors={['#FF6B00', '#FF8C3A']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.micButton}>
+              <Text style={styles.micIcon}>🎤</Text>
+            </LinearGradient>
+          </Pressable>
+          <Text style={styles.holdText}>Hold to Record</Text>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  page: {
     flex: 1,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    padding: 24,
-    paddingTop: 48,
-    backgroundColor: '#fff',
+    backgroundColor: '#0A0A0A',
   },
-  title: {
-    fontSize: 26,
-    fontWeight: '700',
-    marginBottom: 4,
-    textAlign: 'center',
-  },
-  tagline: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 16,
-  },
-  sectionLabel: {
-    alignSelf: 'flex-start',
-    marginTop: 8,
-    marginBottom: 8,
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#333',
-  },
-  cardGrid: {
+  header: {
+    backgroundColor: '#0A0A0A',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2A2A2A',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  personaCard: {
-    width: '47%',
-    borderRadius: 16,
-    backgroundColor: '#f5f5f5',
-    borderWidth: 1,
-    borderColor: '#ddd',
-    padding: 10,
     alignItems: 'center',
-    marginBottom: 8,
+    justifyContent: 'space-between',
   },
-  modeChipActive: {
-    backgroundColor: '#111',
-    borderColor: '#111',
+  headerTitle: {
+    color: '#FFFFFF',
+    fontSize: 26,
+    fontWeight: '800',
   },
-  personaImage: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(17,17,17,0.14)',
-    shadowColor: '#000',
-    shadowOpacity: 0.16,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
-  },
-  personaName: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#333',
-    textAlign: 'center',
-  },
-  personaTitle: {
-    marginTop: 2,
-    fontSize: 11,
-    color: '#555',
-    textAlign: 'center',
-    lineHeight: 16,
-  },
-  modeChipTextActive: {
-    color: '#fff',
-  },
-  familyCard: {
-    alignSelf: 'stretch',
-    paddingVertical: 10,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    alignItems: 'center',
-    marginBottom: 8,
-    backgroundColor: '#f5f5f5',
-  },
-  familyTitle: {
+  headerSubtitle: {
+    color: '#FF6B00',
     fontSize: 13,
-    color: '#333',
     fontWeight: '600',
+    marginTop: 2,
   },
-  hint: {
-    fontSize: 11,
-    color: '#888',
-    marginBottom: 4,
-    maxWidth: '100%',
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#555',
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  spinner: {
-    marginBottom: 12,
-  },
-  button: {
-    paddingVertical: 14,
-    paddingHorizontal: 28,
+  pdfButton: {
+    width: 40,
+    height: 40,
     borderRadius: 12,
-    minWidth: 240,
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
     alignItems: 'center',
     justifyContent: 'center',
-    marginVertical: 8,
   },
-  buttonPrimary: {
-    backgroundColor: '#111',
+  pdfButtonText: {
+    fontSize: 20,
   },
-  buttonSecondary: {
-    backgroundColor: '#e8e8e8',
+  list: {
+    flex: 1,
   },
-  buttonDisabled: {
+  listContent: {
+    padding: 14,
+    paddingBottom: 20,
+  },
+  emptyText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    textAlign: 'center',
+    marginTop: 28,
+  },
+  row: {
+    marginBottom: 12,
+    maxWidth: '100%',
+  },
+  rowUser: {
+    alignItems: 'flex-end',
+  },
+  rowAi: {
+    alignItems: 'flex-start',
+  },
+  bubble: {
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    maxWidth: '84%',
+  },
+  userBubble: {
+    backgroundColor: '#FF6B00',
+    borderBottomRightRadius: 5,
+  },
+  aiBubble: {
+    backgroundColor: '#1A1A1A',
+    borderBottomLeftRadius: 5,
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+  },
+  messageText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  timestampText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    marginTop: 6,
+    alignSelf: 'flex-end',
+  },
+  imageThumb: {
+    width: 165,
+    height: 128,
+    borderRadius: 10,
+    marginBottom: 8,
+    backgroundColor: '#1A1A1A',
+  },
+  inputArea: {
+    backgroundColor: '#141414',
+    borderTopWidth: 1,
+    borderTopColor: '#2A2A2A',
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 12,
+  },
+  previewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  previewThumb: {
+    width: 58,
+    height: 58,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+  },
+  clearImageButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+  },
+  clearImageText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  inputBar: {
+    backgroundColor: '#1A1A1A',
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+    borderRadius: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  cameraButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#141414',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraText: {
+    fontSize: 18,
+    color: '#FFFFFF',
+  },
+  input: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 15,
+    minHeight: 38,
+    maxHeight: 110,
+    paddingVertical: 8,
+  },
+  sendButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FF6B00',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    marginLeft: 1,
+  },
+  disabled: {
     opacity: 0.45,
   },
-  buttonPressed: {
-    opacity: 0.85,
+  micWrap: {
+    alignSelf: 'center',
+    marginTop: 14,
+    borderRadius: 999,
   },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+  micButton: {
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  buttonTextDark: {
-    color: '#111',
-    fontSize: 16,
-    fontWeight: '600',
+  micIcon: {
+    fontSize: 30,
+    color: '#FFFFFF',
   },
-  transcriptBox: {
-    alignSelf: 'stretch',
-    maxHeight: 120,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 10,
-    backgroundColor: '#fafafa',
-  },
-  replyBox: {
-    alignSelf: 'stretch',
-    maxHeight: 260,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 10,
-    backgroundColor: '#f6f9ff',
-  },
-  transcriptContent: {
-    padding: 12,
-  },
-  transcriptText: {
-    fontSize: 16,
-    lineHeight: 22,
-    color: '#111',
-  },
-  familyLabel: {
+  holdText: {
+    color: '#FFFFFF',
     fontSize: 12,
-    fontWeight: '700',
-    color: '#445',
-    marginBottom: 4,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 6,
+  },
+  glowOrange: {
+    shadowColor: '#FF6B00',
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 5,
   },
 });

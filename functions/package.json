@@ -15,7 +15,8 @@
     "firebase-admin": "^13.0.2",
     "firebase-functions": "^6.3.0",
     "multer": "^1.4.5-lts.1",
-    "openai": "^6.34.0"
+    "openai": "^6.34.0",
+    "rss-parser": "^3.13.0"
   },
   "private": true
 }
