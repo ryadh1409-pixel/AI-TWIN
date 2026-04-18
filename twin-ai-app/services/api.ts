@@ -1,3 +1,4 @@
+import { getFirebaseAuth } from '@/lib/firebase';
 import { getRecentMessages, saveMessage } from '@/services/conversationMemory';
 import {
   loadUserProfileForPrompt,
@@ -6,6 +7,18 @@ import {
 import { getForegroundCoords } from '@/services/location';
 import type { LatLng } from '@/services/location';
 import type { Character } from '@/services/userFirestore';
+
+/** Firebase ID token for Cloud Run services that verify `Authorization: Bearer …`. */
+export async function getFirebaseIdToken(): Promise<string | null> {
+  try {
+    const auth = getFirebaseAuth();
+    const user = auth?.currentUser;
+    if (!user) return null;
+    return await user.getIdToken();
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Local dev: use your machine's LAN IP so a physical phone can reach Node
@@ -848,10 +861,21 @@ export async function textToSpeech(
     throw new Error('textToSpeech: empty text');
   }
   try {
-    console.log('[api] POST /tts start', { url: TTS_URL, person });
+    const idToken = await getFirebaseIdToken();
+    const ttsNeedsAuth = /\.run\.app|720055631944/.test(TTS_URL);
+    if (ttsNeedsAuth && !idToken) {
+      throw new Error(
+        'Voice output requires a signed-in user. Sign in with Firebase and try again.',
+      );
+    }
+    const headers: Record<string, string> = {
+      ...JSON_HEADERS,
+      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+    };
+    console.log('[api] POST /tts start', { url: TTS_URL, person, hasAuth: Boolean(idToken) });
     const res = await fetch(TTS_URL, {
       method: 'POST',
-      headers: { ...JSON_HEADERS },
+      headers,
       body: JSON.stringify({ text: trimmed, person }),
     });
     const raw = await res.text();
