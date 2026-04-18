@@ -39,11 +39,29 @@ function companionChatPostUrl(): string {
   const b = CHAT_URL.replace(/\/$/, '');
   return b.endsWith('/chat') ? b : `${b}/chat`;
 }
+
+/** Split Cloud Run voice services (same GCP project as chat). Used when chat host is cloud but TTS/transcribe env vars are unset. */
+const DEFAULT_CLOUD_TTS_URL = 'https://tts-720055631944.us-central1.run.app';
+const DEFAULT_CLOUD_TRANSCRIBE_URL = 'https://transcribe-720055631944.us-central1.run.app';
+
+function isLocalDevApiBase(base: string): boolean {
+  return /localhost|127\.0\.0\.1|^http:\/\/192\.168\.\d+\.\d+|^http:\/\/10\.\d+\.\d+\.\d+/.test(
+    base,
+  );
+}
+
 /** POST /tts — JSON `{ text, person }` (legacy `{ message }` still accepted on server). */
-export const TTS_URL = trimBase(process.env.EXPO_PUBLIC_TTS_URL) || `${API_URL_CLEAN}/tts`;
+export const TTS_URL =
+  trimBase(process.env.EXPO_PUBLIC_TTS_URL) ||
+  (isLocalDevApiBase(API_URL_CLEAN)
+    ? `${API_URL_CLEAN.replace(/\/$/, '')}/tts`
+    : DEFAULT_CLOUD_TTS_URL);
 /** POST /transcribe — multipart field `file` → `{ text }`. */
 export const TRANSCRIBE_URL =
-  trimBase(process.env.EXPO_PUBLIC_TRANSCRIBE_URL) || `${API_URL_CLEAN}/transcribe`;
+  trimBase(process.env.EXPO_PUBLIC_TRANSCRIBE_URL) ||
+  (isLocalDevApiBase(API_URL_CLEAN)
+    ? `${API_URL_CLEAN.replace(/\/$/, '')}/transcribe`
+    : DEFAULT_CLOUD_TRANSCRIBE_URL);
 
 /** Firebase HTTPS: on-demand news (agent tool `getNews`). */
 const DEFAULT_GET_NEWS_URL = 'https://getnews-gehsfp2zqa-uc.a.run.app';
@@ -918,7 +936,12 @@ export async function postVoicePersonChat(
   const res = await fetch(url, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
-    body: JSON.stringify({ message: trimmed, person }),
+    body: JSON.stringify({
+      message: trimmed,
+      person,
+      /** Hint for persona /chat — server defaults to Arabic-first prompts. */
+      language: 'ar',
+    }),
   });
   const raw = await res.text();
   if (!res.ok) {

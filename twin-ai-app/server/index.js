@@ -62,7 +62,8 @@ const ASK_RAG_SYSTEM_PROMPT = `You are an incredibly genius and funny AI Twin.
 You MUST remember everything the user tells you in this conversation.
 If user tells you their name, age, job or any personal info - remember it and use it.
 Current conversation history is included in the messages.
-Be witty, brilliant and hilarious.`;
+Be witty, brilliant and hilarious.
+Default language: Arabic (natural, modern — Gulf/Levantine casual is fine). Use English only when the user clearly writes or speaks in English.`;
 const askRagSessions = new Map();
 const MAX_ASK_RAG_MESSAGES = 20;
 function getAskRagSessionHistory(userId) {
@@ -94,15 +95,15 @@ const PERSON_TO_VOICE_ID = {
 };
 
 const PERSONA_SYSTEM_PROMPTS = {
-  mom: `You are a warm, caring mother figure. Short replies (1–3 sentences). Supportive, gentle humor, no guilt-tripping. Mix Arabic and English only if the user did.`,
-  dad: `You are a steady, wise father figure. Practical, calm, lightly humorous. Short (1–3 sentences). Encourage without lecturing.`,
-  sister: `You are a playful older sister: teasing but kind. Very short, energetic.`,
-  brother: `You are a supportive brother: direct, casual, a little joking. Very short.`,
-  grandma: `You are a kind grandmother: warm stories, soft advice. Short.`,
-  grandpa: `You are a wise grandfather: calm perspective, dry wit. Short.`,
-  friend: `You are the user's best friend: casual, loyal, fun. Short.`,
-  twin: `You are the user's AI twin — brilliant, witty, concise (1–3 sentences). Match the user's language when obvious.`,
-  x: `You are the user's AI twin — brilliant, witty, concise (1–3 sentences).`,
+  mom: `You are a warm, caring mother figure. Short replies (1–3 sentences). Supportive, gentle humor, no guilt-tripping. Default to natural Arabic; use English only if the user clearly uses English.`,
+  dad: `You are a steady, wise father figure. Practical, calm, lightly humorous. Short (1–3 sentences). Encourage without lecturing. Default to natural Arabic; use English only if the user clearly uses English.`,
+  sister: `You are a playful older sister: teasing but kind. Very short, energetic. Default to Arabic; English only if the user clearly uses English.`,
+  brother: `You are a supportive brother: direct, casual, a little joking. Very short. Default to Arabic; English only if the user clearly uses English.`,
+  grandma: `You are a kind grandmother: warm stories, soft advice. Short. Default to Arabic; English only if the user clearly uses English.`,
+  grandpa: `You are a wise grandfather: calm perspective, dry wit. Short. Default to Arabic; English only if the user clearly uses English.`,
+  friend: `You are the user's best friend: casual, loyal, fun. Short. Default to Arabic; English only if the user clearly uses English.`,
+  twin: `You are the user's AI twin — brilliant, witty, concise (1–3 sentences). Default to natural Arabic (MSA or casual dialect). Use English only when the user clearly writes or speaks in English.`,
+  x: `You are the user's AI twin — brilliant, witty, concise (1–3 sentences). Default to natural Arabic. Use English only when the user clearly writes or speaks in English.`,
 };
 
 function normalizePersonKey(raw) {
@@ -1556,13 +1557,21 @@ function parseApiErrorBodyForAgent(text) {
   return text && String(text).slice(0, 200);
 }
 
-async function generatePersonalityReply(message, personKey) {
+async function generatePersonalityReply(message, personKey, options = {}) {
   const roleKey =
     personKey === 'mother' ? 'mom' : personKey === 'father' ? 'dad' : personKey;
-  const system =
+  let system =
     PERSONA_SYSTEM_PROMPTS[roleKey] || PERSONA_SYSTEM_PROMPTS.twin;
+  const pref = options.preferredLanguage;
+  if (pref === 'en') {
+    system += `\nThe user prefers English for this turn: reply in English.`;
+  }
   if (!openai) {
-    return `I heard you — ${normalizeForSpeech(message).slice(0, 200)}`;
+    const fallback =
+      pref === 'en'
+        ? `I heard you — ${normalizeForSpeech(message).slice(0, 200)}`
+        : `سمعتك — ${normalizeForSpeech(message).slice(0, 200)}`;
+    return fallback;
   }
   const completion = await openai.chat.completions.create({
     model: OPENAI_CHAT_MODEL,
@@ -1591,8 +1600,15 @@ async function handleCompanionChat(req, res) {
     const personRaw = typeof req.body?.person === 'string' ? req.body.person.trim() : '';
     if (personRaw) {
       const pKey = normalizePersonKey(personRaw);
-      console.log('[chat] persona branch', { person: pKey, messageLen: message.length });
-      const reply = await generatePersonalityReply(message, pKey);
+      const langRaw =
+        typeof req.body?.language === 'string' ? req.body.language.trim().toLowerCase() : '';
+      const preferredLanguage = langRaw === 'en' ? 'en' : 'ar';
+      console.log('[chat] persona branch', {
+        person: pKey,
+        messageLen: message.length,
+        preferredLanguage,
+      });
+      const reply = await generatePersonalityReply(message, pKey, { preferredLanguage });
       return res.status(200).json({ reply });
     }
 

@@ -22,6 +22,8 @@ export async function playAudioFromBase64(
   });
 
   const player = createAudioPlayer({ uri }, { updateInterval: 250 });
+  /** 1.0 = max gain for this player (system volume still applies). */
+  player.volume = 1;
   const sub = player.addListener(
     'playbackStatusUpdate',
     (status: AudioStatus) => {
