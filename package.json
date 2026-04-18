@@ -1,7 +1,11 @@
 {
   "name": "my-family-ai",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0 <23"
+  },
   "scripts": {
+    "start": "node server.js",
     "server": "node server.js",
     "server:twin-only": "npm run server --prefix twin-ai-app",
     "app": "npm start --prefix twin-ai-app",

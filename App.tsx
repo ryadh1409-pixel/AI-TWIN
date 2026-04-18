@@ -1,7 +1,6 @@
 /**
- * Root entry shim: root `package.json` used to set `main` to Expo AppEntry, which
- * resolves `App` next to the repo root. The real UI lives in `twin-ai-app/App.tsx`.
- *
- * Prefer running the app from `twin-ai-app` (`npm start --prefix twin-ai-app` or `npm run app`).
+ * Root shim when `package.json` `main` points at `expo/AppEntry.js` (repo root).
+ * Prefer `npm run app` / `expo start` from `twin-ai-app` (`main`: `expo-router/entry`).
  */
-export { default } from './twin-ai-app/App';
+import TwinApp from './twin-ai-app/App';
+export default TwinApp;
