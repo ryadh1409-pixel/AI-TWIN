@@ -10,38 +10,10 @@ const path = require("path");
 const multer = require("multer");
 const pdfParse = require("pdf-parse");
 const { RecursiveCharacterTextSplitter } = require("@langchain/textsplitters");
-const OpenAI = require("openai");
 const { OpenAIEmbeddings } = require("@langchain/openai");
 const { FaissStore } = require("@langchain/community/vectorstores/faiss");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_ASK_MODEL =
-  process.env.OPENAI_CHAT_MODEL ||
-  process.env.OPENAI_AGENT_MODEL ||
-  "gpt-4o-mini";
-
-/** In-memory conversation history per user (resets on server restart). */
-const userSessions = new Map();
-const MAX_SESSION_MESSAGES = 20;
-
-function getSessionHistory(userId) {
-  if (!userSessions.has(userId)) {
-    userSessions.set(userId, []);
-  }
-  return userSessions.get(userId);
-}
-
-function trimSessionHistory(arr) {
-  while (arr.length > MAX_SESSION_MESSAGES) {
-    arr.shift();
-  }
-}
-
-const systemPrompt = `You are an incredibly genius and funny AI Twin.
-You MUST remember everything the user tells you in this conversation.
-If user tells you their name, age, job or any personal info - remember it and use it.
-Current conversation history is included in the messages.
-Be witty, brilliant and hilarious.`;
 const EMBEDDING_MODEL = "text-embedding-3-small";
 const FAISS_ROOT = path.resolve(__dirname, "faiss_index");
 const PORT = Number(process.env.PORT) || 3000;
@@ -51,10 +23,6 @@ const embeddings = new OpenAIEmbeddings({
   apiKey: OPENAI_API_KEY,
   model: EMBEDDING_MODEL,
 });
-
-const openaiClient = OPENAI_API_KEY
-  ? new OpenAI({ apiKey: OPENAI_API_KEY })
-  : null;
 
 const upload = multer();
 const uploadPdfMemory = multer({
@@ -228,93 +196,13 @@ app.post("/upload-pdf", uploadPdfMemory.single("file"), async (req, res) => {
   }
 });
 
-app.post("/ask", upload.none(), async (req, res) => {
-  try {
-    if (!OPENAI_API_KEY || !openaiClient) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY." });
-    }
-
-    const question = String(
-      req.body?.message || req.body?.question || "",
-    ).trim();
-    const userId = normalizeUserId(req.body?.userId);
-
-    if (!question) {
-      return res.status(400).json({ error: "Missing question." });
-    }
-    if (!userId) {
-      return res.status(400).json({ error: "Missing userId." });
-    }
-
-    const indexDir = userIndexDir(userId);
-    let ragContext = "";
-    if (hasUserIndex(indexDir)) {
-      const docs = await getChunksFromFaiss(indexDir, question, 5);
-      ragContext = docs
-        .map((doc, i) => `Chunk ${i + 1}:\n${String(doc.pageContent || "")}`)
-        .join("\n\n");
-    } else {
-      console.log(
-        `[rag] /ask no FAISS index for userId=${userId} — reply without RAG chunks`,
-      );
-    }
-
-    const history = getSessionHistory(userId);
-    const clientPairs = Array.isArray(req.body?.conversationHistory)
-      ? req.body.conversationHistory
-      : [];
-    const clientMsgs = [];
-    for (const p of clientPairs.slice(-5)) {
-      const u = String(p?.message ?? "").trim();
-      const a = String(p?.response ?? "").trim();
-      if (u) clientMsgs.push({ role: "user", content: u.slice(0, 8000) });
-      if (a) clientMsgs.push({ role: "assistant", content: a.slice(0, 8000) });
-    }
-
-    let systemContent = systemPrompt;
-    if (ragContext) {
-      systemContent += `\n\n---\nContext from the user's uploaded knowledge (RAG):\n${ragContext}`;
-    }
-
-    /** @type {import('openai').OpenAI.ChatCompletionMessageParam[]} */
-    const messages = [
-      { role: "system", content: systemContent },
-      ...clientMsgs,
-      ...history.map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
-      { role: "user", content: question },
-    ];
-
-    const completion = await openaiClient.chat.completions.create({
-      model: OPENAI_ASK_MODEL,
-      messages,
-      temperature: 0.75,
-      max_tokens: 1024,
-    });
-
-    const raw = completion.choices[0]?.message?.content;
-    const answer = String(raw ?? "").trim();
-    if (!answer) {
-      return res.status(500).json({ error: "Empty model response." });
-    }
-
-    history.push({ role: "user", content: question });
-    history.push({ role: "assistant", content: answer });
-    trimSessionHistory(history);
-
-    return res.status(200).json({ answer });
-  } catch (error) {
-    console.error("[rag] /ask error:", error);
-    return res.status(500).json({
-      error: error instanceof Error ? error.message : "Ask failed.",
-    });
-  }
-});
+/** POST /ask is registered on `twin-ai-app/server/index.js` (Cloud Run + local). */
 
 app.listen(PORT, HOST, () => {
   console.log(
-    `[rag] Listening on http://${HOST}:${PORT} — POST /upload, POST /upload-pdf, POST /ask (+ POST /ask-vision from twin-ai-app/server)`,
+    `[rag] Listening on http://${HOST}:${PORT} — POST /upload, POST /upload-pdf (+ POST /ask, /ask-vision, … from twin-ai-app/server)`,
+  );
+  console.log(
+    `[voice] Same app: POST /transcribe (multipart mock), POST /chat, POST /tts — use LAN IP from device, port ${PORT}`,
   );
 });

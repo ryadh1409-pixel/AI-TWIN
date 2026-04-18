@@ -53,7 +53,71 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+/** Same as root `server.js` RAG /ask (Cloud Run often runs this file without server.js). */
+const OPENAI_ASK_MODEL =
+  process.env.OPENAI_ASK_MODEL ||
+  process.env.OPENAI_AGENT_MODEL ||
+  OPENAI_CHAT_MODEL;
+const ASK_RAG_SYSTEM_PROMPT = `You are an incredibly genius and funny AI Twin.
+You MUST remember everything the user tells you in this conversation.
+If user tells you their name, age, job or any personal info - remember it and use it.
+Current conversation history is included in the messages.
+Be witty, brilliant and hilarious.`;
+const askRagSessions = new Map();
+const MAX_ASK_RAG_MESSAGES = 20;
+function getAskRagSessionHistory(userId) {
+  if (!askRagSessions.has(userId)) {
+    askRagSessions.set(userId, []);
+  }
+  return askRagSessions.get(userId);
+}
+function trimAskRagSessionHistory(arr) {
+  while (arr.length > MAX_ASK_RAG_MESSAGES) {
+    arr.shift();
+  }
+}
 const X_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL';
+
+/** ElevenLabs premade voices — map `person` from POST /tts and persona /chat. */
+const PERSON_TO_VOICE_ID = {
+  x: X_VOICE_ID,
+  twin: X_VOICE_ID,
+  mom: '21m00Tcm4TlvDq8ikWAM',
+  mother: '21m00Tcm4TlvDq8ikWAM',
+  dad: 'TxGEqnHWrfWFTfGW9XjX',
+  father: 'TxGEqnHWrfWFTfGW9XjX',
+  sister: 'MF3mGyEYCl7XYWbV9V6O',
+  brother: 'JBFqnCBsd6RMkjVDRZFK',
+  grandma: 'ThT5KcBeYPX3keUQqHPh',
+  grandpa: 'onwK4e9ZLuTAKqWP03r9',
+  friend: 'ErXwobaYiN019PkySvjV',
+};
+
+const PERSONA_SYSTEM_PROMPTS = {
+  mom: `You are a warm, caring mother figure. Short replies (1–3 sentences). Supportive, gentle humor, no guilt-tripping. Mix Arabic and English only if the user did.`,
+  dad: `You are a steady, wise father figure. Practical, calm, lightly humorous. Short (1–3 sentences). Encourage without lecturing.`,
+  sister: `You are a playful older sister: teasing but kind. Very short, energetic.`,
+  brother: `You are a supportive brother: direct, casual, a little joking. Very short.`,
+  grandma: `You are a kind grandmother: warm stories, soft advice. Short.`,
+  grandpa: `You are a wise grandfather: calm perspective, dry wit. Short.`,
+  friend: `You are the user's best friend: casual, loyal, fun. Short.`,
+  twin: `You are the user's AI twin — brilliant, witty, concise (1–3 sentences). Match the user's language when obvious.`,
+  x: `You are the user's AI twin — brilliant, witty, concise (1–3 sentences).`,
+};
+
+function normalizePersonKey(raw) {
+  const k = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+  if (PERSON_TO_VOICE_ID[k]) return k;
+  return 'twin';
+}
+
+function voiceIdForPerson(person) {
+  const k = normalizePersonKey(person);
+  return PERSON_TO_VOICE_ID[k] || X_VOICE_ID;
+}
 
 const GET_NEWS_AGENT_URL_NODE =
   process.env.GET_NEWS_URL ||
@@ -563,16 +627,13 @@ async function replyWithOpenAI(
   return reply;
 }
 
-async function synthesizeWithElevenLabs(text) {
+async function synthesizeWithElevenLabs(text, personOrVoiceKey = 'twin') {
   if (!ELEVENLABS_API_KEY) {
     throw new Error('Missing ELEVENLABS_API_KEY in .env');
   }
 
-  const voiceId = X_VOICE_ID;
-  if (!voiceId) {
-    throw new Error('Missing ElevenLabs voice for X');
-  }
-  console.log('Using voice:', voiceId);
+  const voiceId = voiceIdForPerson(personOrVoiceKey);
+  console.log('[tts] ElevenLabs voice:', voiceId, 'person:', personOrVoiceKey);
 
   const elevenRes = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
@@ -724,12 +785,88 @@ app.use(cors({ origin: true }));
 app.use(express.json({ limit: '1mb' }));
 
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  const t = new Date().toISOString();
+  const ct = req.headers['content-type'] || '';
+  console.log(`[http] ${t} ${req.method} ${req.originalUrl} ct=${String(ct).slice(0, 72)}`);
+  res.on('finish', () => {
+    console.log(`[http] ${req.method} ${req.originalUrl} -> ${res.statusCode}`);
+  });
   next();
 });
 
 app.get('/', (_req, res) => {
   res.status(200).send('Server is running');
+});
+
+/**
+ * RAG-style text ask (same JSON contract as root `server.js` POST /ask).
+ * Cloud Run deploys this Express app without `server.js`, so this route must exist here.
+ * Note: FAISS uploads live on root server when using `node server.js`; this handler answers
+ * with OpenAI + in-memory session + client conversationHistory (no server-side FAISS here).
+ */
+app.post('/ask', async (req, res) => {
+  try {
+    if (!openai) {
+      return res.status(500).json({ error: 'OpenAI not configured.' });
+    }
+
+    const question = String(
+      req.body?.message || req.body?.question || '',
+    ).trim();
+    const userId = getUserId(req.body?.userId);
+
+    if (!question) {
+      return res.status(400).json({ error: 'Missing question.' });
+    }
+
+    const history = getAskRagSessionHistory(userId);
+    const clientPairs = Array.isArray(req.body?.conversationHistory)
+      ? req.body.conversationHistory
+      : [];
+    const clientMsgs = [];
+    for (const p of clientPairs.slice(-5)) {
+      const u = String(p?.message ?? '').trim();
+      const a = String(p?.response ?? '').trim();
+      if (u) clientMsgs.push({ role: 'user', content: u.slice(0, 8000) });
+      if (a) clientMsgs.push({ role: 'assistant', content: a.slice(0, 8000) });
+    }
+
+    const messages = [
+      { role: 'system', content: ASK_RAG_SYSTEM_PROMPT },
+      ...clientMsgs,
+      ...history.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+      { role: 'user', content: question },
+    ];
+
+    console.log('[ask] RAG-lite', { userId, questionLen: question.length });
+
+    const completion = await openai.chat.completions.create({
+      model: OPENAI_ASK_MODEL,
+      messages,
+      temperature: 0.75,
+      max_tokens: 1024,
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    const answer = String(raw ?? '').trim();
+    if (!answer) {
+      return res.status(500).json({ error: 'Empty model response.' });
+    }
+
+    history.push({ role: 'user', content: question });
+    history.push({ role: 'assistant', content: answer });
+    trimAskRagSessionHistory(history);
+
+    return res.status(200).json({ answer });
+  } catch (error) {
+    console.error('[ask] error:', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Ask failed.',
+    });
+  }
 });
 
 app.post('/agent/decide', async (req, res) => {
@@ -1419,12 +1556,44 @@ function parseApiErrorBodyForAgent(text) {
   return text && String(text).slice(0, 200);
 }
 
+async function generatePersonalityReply(message, personKey) {
+  const roleKey =
+    personKey === 'mother' ? 'mom' : personKey === 'father' ? 'dad' : personKey;
+  const system =
+    PERSONA_SYSTEM_PROMPTS[roleKey] || PERSONA_SYSTEM_PROMPTS.twin;
+  if (!openai) {
+    return `I heard you — ${normalizeForSpeech(message).slice(0, 200)}`;
+  }
+  const completion = await openai.chat.completions.create({
+    model: OPENAI_CHAT_MODEL,
+    temperature: 0.62,
+    max_tokens: 240,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: normalizeForSpeech(message) },
+    ],
+  });
+  const reply = normalizeForSpeech(completion.choices?.[0]?.message?.content);
+  if (!reply) {
+    throw new Error('Empty persona reply.');
+  }
+  return reply;
+}
+
 async function handleCompanionChat(req, res) {
   try {
     const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
     const userId = getUserId(req.body?.userId);
     if (!message) {
       return res.status(400).json({ error: 'Missing message.' });
+    }
+
+    const personRaw = typeof req.body?.person === 'string' ? req.body.person.trim() : '';
+    if (personRaw) {
+      const pKey = normalizePersonKey(personRaw);
+      console.log('[chat] persona branch', { person: pKey, messageLen: message.length });
+      const reply = await generatePersonalityReply(message, pKey);
+      return res.status(200).json({ reply });
     }
 
     const location = parseLocationFromRequest(req.body?.location);
@@ -1491,14 +1660,19 @@ app.post('/', handleCompanionChat);
 
 app.post('/transcribe', upload.single('file'), async (req, res) => {
   try {
-    console.log('[transcribe] called');
+    console.log('[transcribe] called', {
+      hasFile: Boolean(req.file),
+      mime: req.file?.mimetype,
+      size: req.file?.size,
+      name: req.file?.originalname,
+    });
     if (!req.file) {
       return res.status(400).json({ error: 'Missing file in field "file".' });
     }
-    const text = await transcribeWithOpenAI(req.file);
-    return res.status(200).json({ text });
+    // Mock path for local voice pipeline (swap for transcribeWithOpenAI when ready).
+    return res.status(200).json({ text: 'Hello, I heard you' });
   } catch (error) {
-    console.error('/transcribe error:', error);
+    console.error('[transcribe] error:', error);
     const message = error instanceof Error ? error.message : 'Transcription failed.';
     return res.status(500).json({ error: message });
   }
@@ -1507,11 +1681,20 @@ app.post('/transcribe', upload.single('file'), async (req, res) => {
 // Public local TTS endpoint: no Firebase auth token/middleware required.
 app.post('/tts', async (req, res) => {
   try {
-    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    const rawText =
+      typeof req.body?.text === 'string'
+        ? req.body.text
+        : typeof req.body?.message === 'string'
+          ? req.body.message
+          : '';
+    const text = String(rawText || '').trim();
     if (!text) {
-      return res.status(400).json({ error: 'Missing text.' });
+      return res.status(400).json({ error: 'Missing text (or legacy message).' });
     }
-    const tts = await synthesizeWithElevenLabs(text);
+    const personRaw = typeof req.body?.person === 'string' ? req.body.person.trim() : 'twin';
+    const personKey = normalizePersonKey(personRaw);
+    console.log('[tts] request', { textLen: text.length, person: personKey });
+    const tts = await synthesizeWithElevenLabs(text, personKey);
     return res.status(200).json({
       audioBase64: tts.audioBase64,
       mimeType: tts.mimeType,
@@ -1519,7 +1702,7 @@ app.post('/tts', async (req, res) => {
       voice: tts.voice,
     });
   } catch (error) {
-    console.error('/tts error:', error);
+    console.error('[tts] error:', error);
     const message = error instanceof Error ? error.message : 'TTS failed.';
     return res.status(500).json({ error: message });
   }
@@ -1782,11 +1965,16 @@ app.post('/chat-audio', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Missing audio file in field "file".' });
     }
 
+    const personRaw = typeof req.body?.person === 'string' ? req.body.person.trim() : '';
+    const personKey = personRaw ? normalizePersonKey(personRaw) : 'twin';
+
     console.log(
       '[chat-audio] upload:',
       req.file.originalname,
       req.file.mimetype,
       req.file.size,
+      'person:',
+      personKey,
     );
     const transcript = await transcribeWithOpenAI(req.file);
     console.log('[chat-audio] transcript:', transcript);
@@ -1797,7 +1985,7 @@ app.post('/chat-audio', upload.single('file'), async (req, res) => {
       text: transcript,
       location,
     });
-    const tts = await synthesizeWithElevenLabs(result.reply);
+    const tts = await synthesizeWithElevenLabs(result.reply, personKey);
 
     return res.status(200).json({
       transcript,

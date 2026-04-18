@@ -136,7 +136,7 @@ export async function speak(text, callbacks = {}) {
   }
 
   try {
-    const payload = await textToSpeech(trimmed, 'X');
+    const payload = await textToSpeech(trimmed, 'twin');
     const uri = `data:${payload.audioMimeType};base64,${payload.audioBase64}`;
     onPlaybackStart?.();
     const sound = await playFromUri(uri);

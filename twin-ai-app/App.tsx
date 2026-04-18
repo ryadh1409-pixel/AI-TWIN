@@ -20,11 +20,21 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { askTwinRag, askTwinVision, transcribeAudio, uploadTwinPdf } from '@/services/api';
-import { speak } from '@/services/elevenlabs';
+import type { VoicePerson } from '@/services/api';
+import {
+  askTwinRag,
+  askTwinVision,
+  postVoicePersonChat,
+  textToSpeech,
+  transcribeAudio,
+  uploadTwinPdf,
+} from '@/services/api';
+import { playAudioFromBase64 } from '@/services/voicePlayback';
 
 const USER_ID = 'local-user';
 const MAX_MESSAGES = 20;
+/** Persona for voice: record → /transcribe → /chat → /tts (server ElevenLabs). */
+const VOICE_CHAT_PERSON: VoicePerson = 'twin';
 
 type ChatMessage = {
   id: string;
@@ -274,7 +284,7 @@ export default function App() {
       const uri = recording.getURI();
       if (!uri) throw new Error('Failed to read recording file.');
 
-      const { text } = await transcribeAudio(uri, 'X');
+      const { text } = await transcribeAudio(uri, VOICE_CHAT_PERSON);
       const transcript = text.trim();
       if (!transcript) {
         setIsTyping(false);
@@ -283,11 +293,12 @@ export default function App() {
       }
 
       pushMessage('user', transcript);
-      const { answer } = await askTwinRag(USER_ID, transcript);
-      pushMessage('ai', answer);
+      const { reply } = await postVoicePersonChat(transcript, VOICE_CHAT_PERSON);
+      pushMessage('ai', reply);
       setIsTyping(false);
       setIsLoading(false);
-      await speak(answer, {
+      const tts = await textToSpeech(reply, VOICE_CHAT_PERSON);
+      await playAudioFromBase64(tts.audioBase64, tts.audioMimeType, {
         onPlaybackStart: () => setIsSpeaking(true),
         onPlaybackEnd: () => setIsSpeaking(false),
       });

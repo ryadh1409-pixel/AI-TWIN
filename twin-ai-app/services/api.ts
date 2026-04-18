@@ -1,4 +1,3 @@
-import * as FileSystem from 'expo-file-system/legacy';
 import { getRecentMessages, saveMessage } from '@/services/conversationMemory';
 import {
   loadUserProfileForPrompt,
@@ -8,11 +7,14 @@ import { getForegroundCoords } from '@/services/location';
 import type { LatLng } from '@/services/location';
 import type { Character } from '@/services/userFirestore';
 
-/** Fallbacks if env vars are unset (see twin-ai-app/.env). */
-const DEFAULT_API_BASE = 'https://chat-gehsfp2zqa-uc.a.run.app';
-const DEFAULT_TTS_BASE = 'https://tts-gehsfp2zqa-uc.a.run.app';
-/** Firebase HTTPS function — Whisper + OpenAI key stay server-side. */
-const DEFAULT_TRANSCRIBE_URL = 'https://transcribe-gehsfp2zqa-uc.a.run.app';
+/**
+ * Local dev: use your machine's LAN IP so a physical phone can reach Node
+ * (replace 192.168.1.100 with your Wi‑Fi IP). Root `server.js` listens on :3000.
+ */
+const DEV_LAN_SERVER = 'http://192.168.1.100:3000';
+
+/** Fallback when EXPO_PUBLIC_* is unset — LAN dev server (same host for /chat, /tts, /transcribe). */
+const DEFAULT_API_BASE = DEV_LAN_SERVER;
 
 function trimBase(raw?: string | null): string {
   return String(raw || '')
@@ -20,7 +22,7 @@ function trimBase(raw?: string | null): string {
     .replace(/\/$/, '');
 }
 
-/** Single API base from env — use everywhere (no hardcoded LAN URLs). */
+/** Single API base from env — default is LAN dev server (:3000). */
 const API_URL = trimBase(process.env.EXPO_PUBLIC_RAG_BASE_URL) || DEFAULT_API_BASE;
 const API_URL_CLEAN = API_URL.replace(/:1$/, '');
 
@@ -37,11 +39,11 @@ function companionChatPostUrl(): string {
   const b = CHAT_URL.replace(/\/$/, '');
   return b.endsWith('/chat') ? b : `${b}/chat`;
 }
-/** Dedicated TTS service (POST root; body `{ message }` unchanged). */
-export const TTS_URL = trimBase(process.env.EXPO_PUBLIC_TTS_URL) || DEFAULT_TTS_BASE;
-/** Transcribe (multipart `file` → `{ text }`); no API key in the app bundle. */
+/** POST /tts — JSON `{ text, person }` (legacy `{ message }` still accepted on server). */
+export const TTS_URL = trimBase(process.env.EXPO_PUBLIC_TTS_URL) || `${API_URL_CLEAN}/tts`;
+/** POST /transcribe — multipart field `file` → `{ text }`. */
 export const TRANSCRIBE_URL =
-  trimBase(process.env.EXPO_PUBLIC_TRANSCRIBE_URL) || DEFAULT_TRANSCRIBE_URL;
+  trimBase(process.env.EXPO_PUBLIC_TRANSCRIBE_URL) || `${API_URL_CLEAN}/transcribe`;
 
 /** Firebase HTTPS: on-demand news (agent tool `getNews`). */
 const DEFAULT_GET_NEWS_URL = 'https://getnews-gehsfp2zqa-uc.a.run.app';
@@ -57,7 +59,10 @@ export const PROACTIVE_URL = `${API_URL_CLEAN}/proactive`;
 export const COMPANION_INITIATIVE_URL = `${API_URL_CLEAN.replace(/\/$/, '')}/companion/initiative`;
 export const UPLOAD_URL = `${API_URL_CLEAN}/upload`;
 export const UPLOAD_PDF_URL = `${API_URL_CLEAN}/upload-pdf`;
+/** @deprecated Base only — use ASK_RAG_URL for POST /ask */
 export const ASK_URL = API_URL_CLEAN;
+/** RAG-style ask: POST JSON `{ message, userId?, conversationHistory? }` → `{ answer }` (served by `twin-ai-app/server/index.js`). */
+export const ASK_RAG_URL = `${API_URL_CLEAN.replace(/\/$/, '')}/ask`;
 export const ASK_VISION_URL = `${API_URL_CLEAN}/ask-vision`;
 export const CHAT_AUDIO_URL = `${API_URL_CLEAN}/chat-audio`;
 /** Planning agent: plan → execute steps (news / sleep / chat / tts) → combined reply */
@@ -412,7 +417,18 @@ function getSuggestionSessionId(): string {
   return suggestionSessionId;
 }
 
-export type VoicePerson = 'X';
+export type VoicePerson =
+  | 'twin'
+  | 'x'
+  | 'mom'
+  | 'mother'
+  | 'dad'
+  | 'father'
+  | 'sister'
+  | 'brother'
+  | 'grandma'
+  | 'grandpa'
+  | 'friend';
 
 export type AudioPayload = {
   audioBase64: string;
@@ -631,7 +647,7 @@ export async function sendProactiveContextCheck(
 
 export async function sendChat(
   message: string,
-  _person: VoicePerson = 'X',
+  _person: VoicePerson = 'twin',
   _location?: LatLng | null,
   options?: {
     userId?: string;
@@ -745,11 +761,10 @@ export async function askTwinRag(
   if (!q) {
     throw new Error('askTwinRag: empty question');
   }
-  const askUrl = `${API_URL_CLEAN.replace(/\/$/, '')}/ask`;
   const recent = await getRecentMessages(uid, 5);
   try {
-    console.log('[api] POST ask', { url: askUrl });
-    const data = await postJsonMessage(askUrl, q, {
+    console.log('[api] POST ask', { url: ASK_RAG_URL });
+    const data = await postJsonMessage(ASK_RAG_URL, q, {
       userId: uid,
       conversationHistory: recent,
     });
@@ -808,21 +823,21 @@ export async function askTwinVision(
 
 export async function textToSpeech(
   text: string,
-  _person: VoicePerson = 'X',
+  person: VoicePerson = 'twin',
 ): Promise<AudioPayload> {
   const trimmed = String(text ?? '').trim();
   if (!trimmed) {
     throw new Error('textToSpeech: empty text');
   }
   try {
-    console.log('[api] POST /tts start', { url: TTS_URL });
+    console.log('[api] POST /tts start', { url: TTS_URL, person });
     const res = await fetch(TTS_URL, {
       method: 'POST',
       headers: { ...JSON_HEADERS },
-      body: JSON.stringify({ message: trimmed }),
+      body: JSON.stringify({ text: trimmed, person }),
     });
     const raw = await res.text();
-    console.log('[api] POST /tts response', { status: res.status, raw });
+    console.log('[api] POST /tts response', { status: res.status, bytes: raw.length });
     if (!res.ok) {
       console.error('[api] POST /tts error', { status: res.status, raw });
       throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
@@ -856,32 +871,29 @@ export async function textToSpeech(
 
 export const transcribeAudio = async (
   uri: string,
-  _person: VoicePerson = 'X',
+  _person: VoicePerson = 'twin',
 ): Promise<TranscribeResult> => {
   void _person;
   if (!uri) throw new Error('Missing recording URI.');
-  console.log('[transcribe] URI received:', uri);
+  console.log('[transcribe] multipart →', TRANSCRIBE_URL);
 
-  const base64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-
-  console.log('[transcribe] base64 length:', base64.length);
+  const formData = new FormData();
+  formData.append('file', {
+    uri,
+    name: 'audio.m4a',
+    type: 'audio/m4a',
+  } as any);
 
   const res = await fetch(TRANSCRIBE_URL, {
     method: 'POST',
+    body: formData,
     headers: {
-      'Content-Type': 'application/json',
       Accept: 'application/json',
     },
-    body: JSON.stringify({
-      audioBase64: base64,
-      mimeType: 'audio/m4a',
-    }),
   });
 
   const raw = await res.text();
-  console.log('[transcribe] response:', { status: res.status, raw });
+  console.log('[transcribe] response:', { status: res.status, raw: raw.slice(0, 200) });
 
   if (!res.ok) {
     console.error('[transcribe] error:', raw);
@@ -894,6 +906,30 @@ export const transcribeAudio = async (
   }
   return data;
 };
+
+/** Voice pipeline: POST /chat with `{ message, person }` → `{ reply }` (persona branch on server). */
+export async function postVoicePersonChat(
+  message: string,
+  person: VoicePerson,
+): Promise<{ reply: string }> {
+  const trimmed = String(message || '').trim();
+  if (!trimmed) throw new Error('postVoicePersonChat: empty message.');
+  const url = companionChatPostUrl();
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { ...JSON_HEADERS },
+    body: JSON.stringify({ message: trimmed, person }),
+  });
+  const raw = await res.text();
+  if (!res.ok) {
+    throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
+  }
+  const data = JSON.parse(raw) as { reply?: string };
+  if (typeof data.reply !== 'string' || !data.reply.trim()) {
+    throw new Error('Invalid /chat response: expected { reply: string }');
+  }
+  return { reply: data.reply.trim() };
+}
 
 export async function sendChatMessage(
   _idToken: string,
@@ -1046,5 +1082,5 @@ export async function synthesizeSpeech(
   text: string,
 ): Promise<AudioPayload> {
   void _character;
-  return textToSpeech(text, 'X');
+  return textToSpeech(text, 'twin');
 }
