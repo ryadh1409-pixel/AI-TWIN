@@ -1,4 +1,4 @@
-import { Audio } from 'expo-av';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { textToSpeech } from './api';
 
 /** Antoni — smooth, confident male (ElevenLabs) */
@@ -36,35 +36,27 @@ function toBase64(buffer) {
 }
 
 /**
- * Play at maximum system volume: expo-av volume 1.0, full rate, unmuted.
  * @param {string} uri
- * @returns {Promise<import('expo-av').Audio.Sound>}
  */
-async function playFromUri(uri) {
-  await Audio.setAudioModeAsync({
-    playsInSilentModeIOS: true,
-    allowsRecordingIOS: false,
-    staysActiveInBackground: false,
-    shouldDuckAndroid: true,
-    playThroughEarpieceAndroid: false,
+async function playUriWithLifecycle(uri, onPlaybackEnd) {
+  await setAudioModeAsync({
+    playsInSilentMode: true,
+    allowsRecording: false,
   });
 
-  const initialStatus = {
-    shouldPlay: false,
-    volume: 1.0,
-    rate: 1.0,
-    isMuted: false,
-  };
-
-  const { sound } = await Audio.Sound.createAsync({ uri }, initialStatus);
-  await sound.setVolumeAsync(1.0);
-  await sound.setRateAsync(1.0, true);
-  await sound.setIsMutedAsync(false);
-  await sound.playAsync();
-  return sound;
+  const player = createAudioPlayer({ uri }, { updateInterval: 250 });
+  const sub = player.addListener('playbackStatusUpdate', (status) => {
+    if (status.didJustFinish) {
+      onPlaybackEnd?.();
+      sub.remove();
+      player.remove();
+    }
+  });
+  player.volume = 1;
+  player.play();
 }
 
-async function playFromElevenLabsBlob(blob) {
+async function playFromElevenLabsBlob(blob, onPlaybackEnd) {
   let uri = '';
   if (
     typeof URL !== 'undefined' &&
@@ -76,12 +68,11 @@ async function playFromElevenLabsBlob(blob) {
     const base64 = toBase64(arrayBuffer);
     uri = `data:audio/mpeg;base64,${base64}`;
   }
-  return playFromUri(uri);
+  await playUriWithLifecycle(uri, onPlaybackEnd);
 }
 
 /**
  * Speak text: ElevenLabs (Antoni) first, then backend POST /tts via `textToSpeech`.
- * The fallback /tts call is intentionally unauthenticated for local development.
  *
  * @param {string} text
  * @param {{ onPlaybackStart?: () => void; onPlaybackEnd?: () => void }} [callbacks]
@@ -92,16 +83,6 @@ export async function speak(text, callbacks = {}) {
   if (!trimmed) return;
 
   const apiKey = process.env.EXPO_PUBLIC_ELEVENLABS_API_KEY?.trim();
-
-  const attachEndListener = (sound) => {
-    sound.setOnPlaybackStatusUpdate((status) => {
-      if (!status.isLoaded) return;
-      if (status.didJustFinish) {
-        onPlaybackEnd?.();
-        void sound.unloadAsync().catch(() => {});
-      }
-    });
-  };
 
   if (apiKey) {
     try {
@@ -124,8 +105,7 @@ export async function speak(text, callbacks = {}) {
       if (response.ok) {
         const blob = await response.blob();
         onPlaybackStart?.();
-        const sound = await playFromElevenLabsBlob(blob);
-        attachEndListener(sound);
+        await playFromElevenLabsBlob(blob, onPlaybackEnd);
         return;
       }
       const detail = await response.text();
@@ -139,8 +119,7 @@ export async function speak(text, callbacks = {}) {
     const payload = await textToSpeech(trimmed, 'twin');
     const uri = `data:${payload.audioMimeType};base64,${payload.audioBase64}`;
     onPlaybackStart?.();
-    const sound = await playFromUri(uri);
-    attachEndListener(sound);
+    await playUriWithLifecycle(uri, onPlaybackEnd);
   } catch (error) {
     console.error('[tts] fallback failed', error);
     throw error;

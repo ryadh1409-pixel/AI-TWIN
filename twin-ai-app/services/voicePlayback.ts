@@ -1,4 +1,4 @@
-import { Audio } from 'expo-av';
+import { createAudioPlayer, setAudioModeAsync, type AudioStatus } from 'expo-audio';
 
 export type VoicePlaybackCallbacks = {
   onPlaybackStart?: () => void;
@@ -6,39 +6,33 @@ export type VoicePlaybackCallbacks = {
 };
 
 /**
- * Play MP3 (or other) returned from POST /tts as base64 using a data URI.
+ * Play MP3 (or other) returned from POST /tts as base64 using a data URI (expo-audio).
  */
 export async function playAudioFromBase64(
   audioBase64: string,
   mimeType: string,
   callbacks: VoicePlaybackCallbacks = {},
-): Promise<Audio.Sound> {
+): Promise<void> {
   const { onPlaybackStart, onPlaybackEnd } = callbacks;
   const uri = `data:${mimeType};base64,${audioBase64}`;
 
-  await Audio.setAudioModeAsync({
-    playsInSilentModeIOS: true,
-    allowsRecordingIOS: false,
-    staysActiveInBackground: false,
-    shouldDuckAndroid: true,
-    playThroughEarpieceAndroid: false,
+  await setAudioModeAsync({
+    playsInSilentMode: true,
+    allowsRecording: false,
   });
 
-  const { sound } = await Audio.Sound.createAsync(
-    { uri },
-    { shouldPlay: false, volume: 1, rate: 1, isMuted: false },
+  const player = createAudioPlayer({ uri }, { updateInterval: 250 });
+  const sub = player.addListener(
+    'playbackStatusUpdate',
+    (status: AudioStatus) => {
+      if (status.didJustFinish) {
+        onPlaybackEnd?.();
+        sub.remove();
+        player.remove();
+      }
+    },
   );
-  await sound.setVolumeAsync(1);
-
-  sound.setOnPlaybackStatusUpdate((status) => {
-    if (!status.isLoaded) return;
-    if (status.didJustFinish) {
-      onPlaybackEnd?.();
-      void sound.unloadAsync().catch(() => {});
-    }
-  });
 
   onPlaybackStart?.();
-  await sound.playAsync();
-  return sound;
+  player.play();
 }

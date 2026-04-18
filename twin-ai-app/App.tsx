@@ -1,5 +1,12 @@
-import { Audio } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
+import {
+  getRecordingPermissionsAsync,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -51,7 +58,8 @@ type PendingImage = {
 };
 
 export default function App() {
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(audioRecorder);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const pulseAnim = useRef(new Animated.Value(0)).current;
   const pressScaleAnim = useRef(new Animated.Value(1)).current;
@@ -61,7 +69,6 @@ export default function App() {
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [isPdfUploading, setIsPdfUploading] = useState(false);
   const [micAllowed, setMicAllowed] = useState<boolean>(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -73,8 +80,8 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const permission = await Audio.requestPermissionsAsync();
-        setMicAllowed(permission.status === 'granted');
+        const permission = await getRecordingPermissionsAsync();
+        setMicAllowed(Boolean(permission.granted));
       } catch {
         setMicAllowed(false);
       }
@@ -82,7 +89,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (isRecording) {
+    if (recorderState.isRecording) {
       Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
@@ -103,19 +110,21 @@ export default function App() {
       pulseAnim.stopAnimation();
       pulseAnim.setValue(0);
     }
-  }, [isRecording, pulseAnim]);
+  }, [recorderState.isRecording, pulseAnim]);
 
   useEffect(() => {
     return () => {
       void (async () => {
         try {
-          if (recordingRef.current) await recordingRef.current.stopAndUnloadAsync();
+          if (audioRecorder.getStatus().isRecording) {
+            await audioRecorder.stop();
+          }
         } catch {
           /* ignore */
         }
       })();
     };
-  }, []);
+  }, [audioRecorder]);
 
   const pushMessage = (role: 'user' | 'ai', text: string, imageUri?: string) => {
     const message: ChatMessage = {
@@ -243,11 +252,11 @@ export default function App() {
   };
 
   const startRecording = async () => {
-    if (isLoading || isPdfUploading || isRecording) return;
+    if (isLoading || isPdfUploading || audioRecorder.getStatus().isRecording) return;
     try {
       if (!micAllowed) {
-        const permission = await Audio.requestPermissionsAsync();
-        const granted = permission.status === 'granted';
+        const permission = await requestRecordingPermissionsAsync();
+        const granted = Boolean(permission.granted);
         setMicAllowed(granted);
         if (!granted) {
           Alert.alert('Microphone', 'Microphone permission is required.');
@@ -255,33 +264,26 @@ export default function App() {
         }
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
-      );
-      recordingRef.current = recording;
-      setIsRecording(true);
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
     } catch (error) {
-      setIsRecording(false);
       Alert.alert('Recording error', error instanceof Error ? error.message : String(error));
     }
   };
 
   const stopRecordingAndAsk = async () => {
-    const recording = recordingRef.current;
-    if (!recording || !isRecording) return;
+    if (!audioRecorder.getStatus().isRecording) return;
 
-    setIsRecording(false);
     setIsLoading(true);
     setIsTyping(true);
 
     try {
-      await recording.stopAndUnloadAsync();
-      recordingRef.current = null;
-      const uri = recording.getURI();
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri ?? recorderState.url ?? undefined;
       if (!uri) throw new Error('Failed to read recording file.');
 
       const { text } = await transcribeAudio(uri, VOICE_CHAT_PERSON);
@@ -466,7 +468,7 @@ export default function App() {
                   transform: [{ scale: pressScaleAnim }],
                 },
               ]}>
-              {isRecording ? (
+              {recorderState.isRecording ? (
                 <Animated.View
                   style={[
                     styles.recordPulse,
@@ -486,8 +488,8 @@ export default function App() {
               </LinearGradient>
             </Animated.View>
           </Pressable>
-          <Text style={[styles.holdLabel, isRecording && styles.recordingLabel]}>
-            {isRecording ? 'جاري التسجيل...' : 'اضغط مطولاً للتسجيل'}
+          <Text style={[styles.holdLabel, recorderState.isRecording && styles.recordingLabel]}>
+            {recorderState.isRecording ? 'جاري التسجيل...' : 'اضغط مطولاً للتسجيل'}
           </Text>
         </View>
       </KeyboardAvoidingView>

@@ -1,7 +1,7 @@
-import { Audio } from 'expo-av';
+import { createAudioPlayer, setAudioModeAsync, type AudioStatus } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
 
-let activeSound: Audio.Sound | null = null;
+let activePlayer: ReturnType<typeof createAudioPlayer> | null = null;
 
 export async function playBase64Mp3(audioBase64: string): Promise<void> {
   if (!audioBase64) return;
@@ -13,47 +13,38 @@ export async function playBase64Mp3(audioBase64: string): Promise<void> {
     encoding: FileSystem.EncodingType.Base64,
   });
 
-  await Audio.setAudioModeAsync({
-    playsInSilentModeIOS: true,
-    staysActiveInBackground: false,
-    shouldDuckAndroid: true,
-    playThroughEarpieceAndroid: false,
-    interruptionModeIOS: Audio.InterruptionModeIOS.DuckOthers,
-    interruptionModeAndroid: Audio.InterruptionModeAndroid.DuckOthers,
+  await setAudioModeAsync({
+    playsInSilentMode: true,
+    allowsRecording: false,
   });
 
-  if (activeSound) {
+  if (activePlayer) {
     try {
-      await activeSound.stopAsync();
-      await activeSound.unloadAsync();
+      activePlayer.pause();
+      activePlayer.remove();
     } catch {
-      // ignore best-effort cleanup
+      /* ignore */
     }
-    activeSound = null;
+    activePlayer = null;
   }
 
-  const { sound } = await Audio.Sound.createAsync(
-    { uri: fileUri },
-    {
-      shouldPlay: true,
-      volume: 1.0,
-      rate: 1.0,
-      isMuted: false,
-    },
-  );
-  activeSound = sound;
-  await sound.setVolumeAsync(1.0);
-  await sound.setRateAsync(1.0, true);
-  await sound.setIsMutedAsync(false);
+  const player = createAudioPlayer({ uri: fileUri }, { updateInterval: 250 });
+  activePlayer = player;
 
-  sound.setOnPlaybackStatusUpdate((status) => {
-    if (!status.isLoaded) return;
-    if (status.didJustFinish) {
-      void sound.unloadAsync();
-      if (activeSound === sound) {
-        activeSound = null;
-      }
-      void FileSystem.deleteAsync(fileUri, { idempotent: true });
+  const sub = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+    if (!status.didJustFinish) return;
+    sub.remove();
+    try {
+      player.remove();
+    } catch {
+      /* ignore */
     }
+    if (activePlayer === player) {
+      activePlayer = null;
+    }
+    void FileSystem.deleteAsync(fileUri, { idempotent: true });
   });
+
+  player.volume = 1;
+  player.play();
 }
