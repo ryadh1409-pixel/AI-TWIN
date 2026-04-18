@@ -455,6 +455,20 @@ async function synthesizeCharacterSpeech(client, uid, character, text) {
   }
 }
 
+function clientConversationMessages(body) {
+  const pairs = Array.isArray(body?.conversationHistory)
+    ? body.conversationHistory
+    : [];
+  const out = [];
+  for (const p of pairs.slice(-5)) {
+    const u = String(p?.message ?? "").trim();
+    const a = String(p?.response ?? "").trim();
+    if (u) out.push({ role: "user", content: u.slice(0, 8000) });
+    if (a) out.push({ role: "assistant", content: a.slice(0, 8000) });
+  }
+  return out;
+}
+
 function createChatHandler(OpenAI, openaiApiKey) {
   return async function chatPost(req, res) {
     const uid = req.uid;
@@ -499,6 +513,7 @@ function createChatHandler(OpenAI, openaiApiKey) {
       const messages = [
         { role: "system", content: `${systemPrompt}\n\n${contextBlock}` },
         { role: "system", content: humanizing },
+        ...clientConversationMessages(req.body),
         ...history.map((h) => ({ role: h.role, content: h.content })),
         { role: "user", content: message },
       ];

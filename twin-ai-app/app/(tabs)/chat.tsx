@@ -1,4 +1,5 @@
 import { NearbyPlaceChips } from '@/components/NearbyPlaceChips';
+import { useRetention } from '@/contexts/RetentionContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { isFirebaseConfigured } from '@/lib/firebase';
 import { playBase64Mp3 } from '@/services/audioPlayback';
@@ -9,6 +10,7 @@ import {
   TTS_URL,
   type NearbyPlaceSuggestion,
 } from '@/services/api';
+import { logBehaviorUserMessage } from '@/services/userBehaviorFirestore';
 import {
   subscribeMessages,
   type FamilyMessage,
@@ -93,12 +95,15 @@ function CharacterAvatar({
 export default function ChatScreen() {
   const params = useLocalSearchParams<{ character?: string }>();
   const { user, loading: authLoading, idToken, refreshIdToken } = useAuth();
+  const { refresh: refreshRetention } = useRetention();
   const [character, setCharacter] = useState<Character>('mom');
   const [messages, setMessages] = useState<(MomDadMessage | FamilyMessage)[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [lastNearby, setLastNearby] = useState<NearbyPlaceSuggestion[]>([]);
   const [lastNearbySource, setLastNearbySource] = useState<string | undefined>();
+  /** At most one server-generated follow-up per send; cleared on new send or dismiss. */
+  const [nextActionHint, setNextActionHint] = useState<string | null>(null);
 
   useEffect(() => {
     const c = params.character;
@@ -112,6 +117,10 @@ export default function ChatScreen() {
       setCharacter(c);
     }
   }, [params.character]);
+
+  useEffect(() => {
+    setNextActionHint(null);
+  }, [character]);
 
   useEffect(() => {
     if (!user || !isFirebaseConfigured()) {
@@ -130,6 +139,7 @@ export default function ChatScreen() {
       return;
     }
     setSending(true);
+    setNextActionHint(null);
     setInput('');
     try {
       let token = idToken;
@@ -138,9 +148,13 @@ export default function ChatScreen() {
       } catch {
         /* keep */
       }
-      const result = await sendChatMessage(token, character, text);
+      const result = await sendChatMessage(token, character, text, user.uid);
+      void logBehaviorUserMessage(user.uid, text);
       setLastNearby(result.nearbySuggestions ?? []);
       setLastNearbySource(result.nearbySource);
+      const hint = result.nextActionSuggestion?.trim();
+      setNextActionHint(hint || null);
+      void refreshRetention();
       if (character !== 'family' && 'reply' in result) {
         const payload =
           result.audio ??
@@ -161,7 +175,7 @@ export default function ChatScreen() {
     } finally {
       setSending(false);
     }
-  }, [input, user, idToken, character, refreshIdToken]);
+  }, [input, user, idToken, character, refreshIdToken, refreshRetention]);
 
   if (authLoading) {
     return (
@@ -274,6 +288,25 @@ export default function ChatScreen() {
       />
 
       <NearbyPlaceChips places={lastNearby} nearbySource={lastNearbySource} />
+
+      {nextActionHint ? (
+        <View
+          style={styles.nextHintCard}
+          accessible
+          accessibilityLabel={`Suggestion: ${nextActionHint}`}>
+          <View style={styles.nextHintRow}>
+            <Text style={styles.nextHintLabel}>Suggestion</Text>
+            <Pressable
+              onPress={() => setNextActionHint(null)}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss suggestion">
+              <Text style={styles.nextHintDismiss}>✕</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.nextHintText}>{nextActionHint}</Text>
+        </View>
+      ) : null}
 
       <View style={styles.inputRow}>
         <TextInput
@@ -401,6 +434,39 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 22,
     color: '#fff',
+  },
+  nextHintCard: {
+    marginTop: 8,
+    marginBottom: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#f4f6fa',
+    borderWidth: 1,
+    borderColor: 'rgba(17, 17, 17, 0.06)',
+  },
+  nextHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  nextHintLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#889',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  nextHintDismiss: {
+    fontSize: 14,
+    color: '#99a',
+    paddingHorizontal: 4,
+  },
+  nextHintText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#334',
   },
   inputRow: {
     flexDirection: 'row',

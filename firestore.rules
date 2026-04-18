@@ -15,5 +15,57 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
+
+    /** Cross-session chat memory (client writes one doc per exchange). */
+    match /conversations/{docId} {
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow read, delete: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    /** Adaptive profile (preferences, topics, usage, mood) — doc id = userId. */
+    match /user_profile/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.userId == userId;
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    /** Autonomous agent core memory (client `memory.ts`) — doc id = userId. */
+    match /agent_core_memory/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    /**
+     * Decision Engine — written by Cloud Functions (Admin); client may read own docs
+     * for UI/history. Updates (e.g. feedback) go through the `decide` HTTPS function.
+     */
+    match /decisions/{docId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    /** Append-only behavior signals (messages, sessions, decisions) — own userId only. */
+    match /user_behavior/{docId} {
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    /** AI-generated insights — written by Cloud Functions; client reads own docs. */
+    match /user_insights/{docId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    /** Predictive snapshots — Cloud Functions only; client reads own. */
+    match /user_predictions/{docId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
   }
 }

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, SafeAreaView, KeyboardAvoidingView, Platform } from 'react-native';
+import { Link } from 'expo-router';
 import { askTwinRag } from '../../services/api';
 
 export default function HomeScreen() {
@@ -13,7 +14,7 @@ export default function HomeScreen() {
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     try {
-      const answer = await askTwinRag(input, 'local-user');
+      const { answer } = await askTwinRag('local-user', input);
       setMessages(prev => [...prev, { id: (Date.now()+1).toString(), role: 'ai', text: answer }]);
     } catch (e) {
       setMessages(prev => [...prev, { id: (Date.now()+1).toString(), role: 'ai', text: 'Error' }]);
@@ -25,6 +26,11 @@ export default function HomeScreen() {
       <View style={{padding:16, borderBottomWidth:1, borderBottomColor:'#2A2A2A'}}>
         <Text style={{color:'#FFFFFF', fontSize:24, fontWeight:'bold'}}>AI Twin</Text>
         <Text style={{color:'#FF6B00', fontSize:14}}>Your Genius AI</Text>
+        <Link href="/decide" asChild>
+          <TouchableOpacity style={{ marginTop: 12, alignSelf: 'flex-start', backgroundColor: '#2A2A2A', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, borderColor: '#c8ff6a' }}>
+            <Text style={{ color: '#c8ff6a', fontWeight: '700' }}>ساعدني أقرر</Text>
+          </TouchableOpacity>
+        </Link>
       </View>
       <FlatList
         ref={flatRef}

@@ -6,10 +6,14 @@ import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import 'react-native-reanimated';
 
+import { BehaviorSessionTracker } from '@/components/BehaviorSessionTracker';
+import { DecisionPushRegistration } from '@/components/DecisionPushRegistration';
 import { ProactiveLaunchPing } from '@/components/ProactiveLaunchPing';
+import { RetentionProgressBanner } from '@/components/RetentionProgressBanner';
 import { SmartCompanionNotifications } from '@/components/SmartCompanionNotifications';
 import { useAuth } from '@/contexts/AuthContext';
 import { AuthProvider } from '@/contexts/AuthContext';
+import { RetentionProvider } from '@/contexts/RetentionContext';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import {
   applyDailyCheckInSchedule,
@@ -65,6 +69,12 @@ function NotificationOpenChat() {
       if (!response) return;
       const data = response.notification.request.content
         .data as Record<string, unknown> | undefined;
+      if (data?.type === 'decision-followup') {
+        requestAnimationFrame(() => {
+          router.push('/(tabs)/decide');
+        });
+        return;
+      }
       if (data?.type !== 'daily-checkin') return;
       const c = data.character;
       if (c !== 'mom' && c !== 'dad' && c !== 'maher' && c !== 'mjeed') return;
@@ -99,19 +109,24 @@ export default function RootLayout() {
 
   return (
     <AuthProvider>
-      <RescheduleDailyNotifications />
-      <NotificationOpenChat />
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <SmartCompanionNotifications />
-        <ProactiveLaunchPing />
-        <Stack>
-          <Stack.Screen name="index" options={{ headerShown: false }} />
-          <Stack.Screen name="setup" options={{ headerShown: false }} />
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-        </Stack>
-        <StatusBar style="auto" />
-      </ThemeProvider>
+      <RetentionProvider>
+        <RescheduleDailyNotifications />
+        <DecisionPushRegistration />
+        <BehaviorSessionTracker />
+        <NotificationOpenChat />
+        <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+          <SmartCompanionNotifications />
+          <RetentionProgressBanner />
+          <ProactiveLaunchPing />
+          <Stack>
+            <Stack.Screen name="index" options={{ headerShown: false }} />
+            <Stack.Screen name="setup" options={{ headerShown: false }} />
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+          </Stack>
+          <StatusBar style="auto" />
+        </ThemeProvider>
+      </RetentionProvider>
     </AuthProvider>
   );
 }

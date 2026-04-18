@@ -1,14 +1,24 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useRetention } from '@/contexts/RetentionContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { sendProactiveContextCheck } from '@/services/api';
-import { getForegroundCoords } from '@/services/location';
+import { isFirebaseConfigured } from '@/lib/firebase';
+import { fetchCompanionInitiative } from '@/services/api';
+import { shouldInitiate } from '@/services/companionInitiative';
+import {
+  loadUserProfile,
+  markProactiveLineShownForSession,
+  markSuggestionIgnored,
+  proactiveLineShownForSession,
+  shouldFetchInitiativeRequest,
+} from '@/services/companionUserProfile';
 import { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const K_LAST_ACTIVITY = '@dt_last_activity_iso';
-const K_LAST_CLIENT_PROACTIVE = '@dt_last_proactive_ping_iso';
-const MIN_CLIENT_HOURS = 8;
+const K_LAST_INITIATIVE_FETCH = '@dt_last_initiative_fetch_iso';
+const K_INITIATIVE_SESSION = '@dt_initiative_session_id';
+const MIN_HOURS_BETWEEN_INITIATIVE_CHECKS = 10;
 
 function timeOfDayLabel(d: Date) {
   const h = d.getHours();
@@ -26,14 +36,29 @@ async function touchActivityStorage() {
   }
 }
 
+async function getOrCreateInitiativeSessionId(): Promise<string> {
+  try {
+    let id = await AsyncStorage.getItem(K_INITIATIVE_SESSION);
+    if (!id) {
+      id = `ini_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+      await AsyncStorage.setItem(K_INITIATIVE_SESSION, id);
+    }
+    return id;
+  } catch {
+    return `ini_${Date.now()}`;
+  }
+}
+
 /**
- * On app open: POST /proactive (rate-limited). Shows X’s line as a chat-style bubble.
+ * Subtle bottom “chat bubble” initiative (max one per initiative session; respects ignored flag).
  */
 export function ProactiveLaunchPing() {
   const { user, loading } = useAuth();
+  const { refresh: refreshRetention } = useRetention();
   const insets = useSafeAreaInsets();
   const [bubbleText, setBubbleText] = useState<string | null>(null);
   const ran = useRef(false);
+  const delayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
@@ -43,40 +68,76 @@ export function ProactiveLaunchPing() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (delayTimer.current) clearTimeout(delayTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
     if (loading) return;
     if (ran.current) return;
     ran.current = true;
 
     void (async () => {
       try {
-        const lastPing = await AsyncStorage.getItem(K_LAST_CLIENT_PROACTIVE);
-        if (lastPing) {
-          const hours = (Date.now() - new Date(lastPing).getTime()) / 3600000;
-          if (hours < MIN_CLIENT_HOURS) {
+        const lastFetch = await AsyncStorage.getItem(K_LAST_INITIATIVE_FETCH);
+        if (lastFetch) {
+          const hours = (Date.now() - new Date(lastFetch).getTime()) / 3600000;
+          if (hours < MIN_HOURS_BETWEEN_INITIATIVE_CHECKS) {
             await touchActivityStorage();
             return;
           }
         }
 
-        const prevActivity = await AsyncStorage.getItem(K_LAST_ACTIVITY);
         const now = new Date();
-        const location = await getForegroundCoords();
         const userId = user?.uid ?? 'local-user';
+        const proactiveSessionId = await getOrCreateInitiativeSessionId();
 
-        const res = await sendProactiveContextCheck({
+        let profileGate: Awaited<ReturnType<typeof loadUserProfile>> | null = null;
+        let proactiveAlreadyShown = false;
+        if (user?.uid && isFirebaseConfigured()) {
+          profileGate = await loadUserProfile(user.uid);
+          proactiveAlreadyShown = await proactiveLineShownForSession(proactiveSessionId);
+          const gate = shouldFetchInitiativeRequest({
+            profile: profileGate,
+            proactiveAlreadyShownThisSession: proactiveAlreadyShown,
+          });
+          if (!gate.shouldFetchServer) {
+            await touchActivityStorage();
+            return;
+          }
+          const ini = shouldInitiate(profileGate, Date.now());
+          if (!ini.ok) {
+            await touchActivityStorage();
+            return;
+          }
+        }
+
+        const res = await fetchCompanionInitiative({
           userId,
-          location,
           time: now.toISOString(),
           timeOfDay: timeOfDayLabel(now),
-          lastActivity: prevActivity,
+          proactiveSessionId,
+          lastTopics: profileGate?.topics ?? [],
         });
 
-        await AsyncStorage.setItem(K_LAST_CLIENT_PROACTIVE, now.toISOString());
+        await AsyncStorage.setItem(K_LAST_INITIATIVE_FETCH, now.toISOString());
         await touchActivityStorage();
 
-        if (res.message && res.skip !== true) {
-          setBubbleText(res.message);
+        if (!res.shouldInitiate || !res.message?.trim()) {
+          return;
         }
+
+        const wait = Math.min(120000, Math.max(0, Number(res.delayMs) || 0));
+        delayTimer.current = setTimeout(() => {
+          const line = res.message!.trim();
+          setBubbleText(line);
+          void markProactiveLineShownForSession(proactiveSessionId);
+          if (user?.uid) {
+            console.log('[companion-retention] suggestion_shown', { userId: user.uid });
+          }
+          delayTimer.current = null;
+        }, wait);
       } catch (e) {
         console.warn('[ProactiveLaunchPing]', e);
       }
@@ -87,24 +148,25 @@ export function ProactiveLaunchPing() {
 
   return (
     <View
-      style={[styles.float, { top: Math.max(insets.top, 8) + 2 }]}
-      accessibilityRole="summary">
-      <View style={styles.row}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>X</Text>
-        </View>
-        <View style={styles.bubbleCol}>
-          <Text style={styles.nameTag}>X</Text>
-          <View style={styles.bubble}>
-            <Text style={styles.bubbleText}>{bubbleText}</Text>
-          </View>
-        </View>
+      style={[styles.bubbleWrap, { bottom: Math.max(insets.bottom, 12) + 56 }]}
+      pointerEvents="box-none"
+      accessibilityRole="text"
+      accessibilityLabel={`Suggestion: ${bubbleText}`}>
+      <View style={styles.bubble}>
+        <Text style={styles.bubbleText}>{bubbleText}</Text>
         <Pressable
-          onPress={() => setBubbleText(null)}
-          hitSlop={12}
-          accessibilityLabel="Dismiss"
-          style={styles.dismissHit}>
-          <Text style={styles.dismiss}>✕</Text>
+          onPress={() => {
+            setBubbleText(null);
+            if (user?.uid && isFirebaseConfigured()) {
+              void markSuggestionIgnored(user.uid);
+              void refreshRetention();
+              console.log('[companion-retention] suggestion_ignored', { userId: user.uid });
+            }
+          }}
+          hitSlop={10}
+          accessibilityLabel="Dismiss suggestion"
+          style={styles.dismiss}>
+          <Text style={styles.dismissText}>✕</Text>
         </Pressable>
       </View>
     </View>
@@ -112,64 +174,39 @@ export function ProactiveLaunchPing() {
 }
 
 const styles = StyleSheet.create({
-  float: {
+  bubbleWrap: {
     position: 'absolute',
-    left: 10,
-    right: 10,
-    zIndex: 9999,
-    elevation: 12,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 8,
-  },
-  avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#1f4f8f',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 2,
-  },
-  avatarText: {
-    color: '#fff',
-    fontWeight: '800',
-    fontSize: 15,
-  },
-  bubbleCol: {
-    flex: 1,
-    maxWidth: '82%',
-  },
-  nameTag: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#456',
-    marginBottom: 4,
-    marginLeft: 2,
+    left: 14,
+    right: 14,
+    zIndex: 36,
+    elevation: 3,
+    alignItems: 'flex-start',
   },
   bubble: {
-    backgroundColor: '#e9effc',
-    borderRadius: 18,
-    borderBottomLeftRadius: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
+    maxWidth: '92%',
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderBottomLeftRadius: 4,
+    backgroundColor: 'rgba(38, 44, 58, 0.94)',
     borderWidth: 1,
-    borderColor: '#d0dcee',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   bubbleText: {
-    fontSize: 15,
-    color: '#1a1a1a',
-    lineHeight: 21,
-  },
-  dismissHit: {
-    padding: 6,
-    alignSelf: 'flex-start',
+    flex: 1,
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.92)',
+    lineHeight: 20,
   },
   dismiss: {
-    fontSize: 16,
-    color: '#666',
-    fontWeight: '600',
+    paddingTop: 2,
+  },
+  dismissText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.45)',
+    fontWeight: '700',
   },
 });

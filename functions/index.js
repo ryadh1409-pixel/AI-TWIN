@@ -11,6 +11,10 @@ const cors = require("cors");
 const Busboy = require("busboy");
 const { default: OpenAI, toFile } = require("openai");
 const { createChatHandler } = require("./chatHandlers");
+const { createDecideApp } = require("./decideApp");
+const { createBehaviorInsightApp } = require("./behaviorInsightApp");
+const { createPredictionApp } = require("./predictionApp");
+const { runCheckFollowUps } = require("./checkFollowUpsRunner");
 
 if (!admin.apps.length) {
   admin.initializeApp();
@@ -364,4 +368,124 @@ exports.sleepStory = onRequest(
     invoker: "public",
   },
   sleepStoryApp,
+);
+
+const getNewsApp = express();
+getNewsApp.disable("x-powered-by");
+getNewsApp.use(cors({ origin: true }));
+getNewsApp.options("*", cors({ origin: true }));
+getNewsApp.use(express.json({ limit: "256kb" }));
+
+async function getNewsHandler(req, res) {
+  try {
+    const apiKey = openaiApiKey.value();
+    if (!apiKey) {
+      return res.status(500).json({ error: "Missing OpenAI configuration." });
+    }
+    const raw = await fetchSaudiGoogleNewsText();
+    const content = await summarizeSaudiNewsArabic(apiKey, raw);
+    return res.status(200).json({
+      reply: content,
+      content,
+      model: process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
+    });
+  } catch (err) {
+    console.error("getNews:", err);
+    return res.status(500).json({ error: err?.message || "getNews failed" });
+  }
+}
+
+getNewsApp.post("/", getNewsHandler);
+getNewsApp.post("/get-news", getNewsHandler);
+getNewsApp.use((req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
+/** POST / — on-demand Saudi news summary (same pipeline as daily digest). */
+exports.getNews = onRequest(
+  {
+    secrets: [openaiApiKey],
+    cors: true,
+    timeoutSeconds: 120,
+    memory: "512MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  getNewsApp,
+);
+
+const decideApp = createDecideApp(openaiApiKey, requireAuth);
+
+/** POST / — authenticated decision report; saves markdown to Firestore `decisions`. */
+exports.decide = onRequest(
+  {
+    secrets: [openaiApiKey],
+    cors: true,
+    timeoutSeconds: 120,
+    memory: "512MiB",
+    maxInstances: 15,
+    invoker: "public",
+  },
+  decideApp,
+);
+
+const behaviorInsightApp = createBehaviorInsightApp(openaiApiKey, requireAuth);
+
+/** POST /generate | POST /feedback — behavioral insights (reads `user_behavior`, writes `user_insights`). */
+exports.behaviorInsight = onRequest(
+  {
+    secrets: [openaiApiKey],
+    cors: true,
+    timeoutSeconds: 120,
+    memory: "512MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  behaviorInsightApp,
+);
+
+const predictionApp = createPredictionApp(openaiApiKey, requireAuth);
+
+/** POST /generate — predictive next-step text from behavior + decisions (`user_predictions`). */
+exports.prediction = onRequest(
+  {
+    secrets: [openaiApiKey],
+    cors: true,
+    timeoutSeconds: 120,
+    memory: "512MiB",
+    maxInstances: 10,
+    invoker: "public",
+  },
+  predictionApp,
+);
+
+/**
+ * Decision follow-ups: pending decisions 24–48h old, AI push line + Expo push
+ * (max 1 successful push per user per 24h; decision-level reminder spacing 24h).
+ */
+exports.checkFollowUpsScheduled = onSchedule(
+  {
+    schedule: "every 6 hours",
+    timeZone: "Asia/Riyadh",
+    secrets: [openaiApiKey],
+    timeoutSeconds: 300,
+    memory: "512MiB",
+  },
+  async () => {
+    const apiKey = openaiApiKey.value();
+    const OpenAI = require("openai").default;
+    const openai = apiKey ? new OpenAI({ apiKey }) : null;
+    try {
+      const r = await runCheckFollowUps(admin.firestore(), openai);
+      console.log(JSON.stringify({ event: "checkFollowUpsScheduled", ok: true, ...r }));
+    } catch (e) {
+      console.error(
+        JSON.stringify({
+          event: "checkFollowUpsScheduled",
+          ok: false,
+          err: String(e?.message || e),
+        }),
+      );
+    }
+  },
 );

@@ -35,9 +35,31 @@ function ensureUser(userId) {
       preferences: [],
       pastInteractions: [],
       lastProactiveAt: null,
+      moodCounts: { tired: 0, stressed: 0, happy: 0, neutral: 0 },
+      lastMood: 'neutral',
+      lastMoodAt: null,
+      frequentTopics: [],
+      lastInteractionAt: null,
+      lastSuggestionAt: null,
+      suggestionSessionCounts: {},
+      lastInitiativeAt: null,
+      initiativeSessionCounts: {},
     };
   }
-  return memory[userId];
+  const u = memory[userId];
+  if (!u.moodCounts) u.moodCounts = { tired: 0, stressed: 0, happy: 0, neutral: 0 };
+  if (u.lastMood === undefined) u.lastMood = 'neutral';
+  if (!Array.isArray(u.frequentTopics)) u.frequentTopics = [];
+  if (u.lastInteractionAt === undefined) u.lastInteractionAt = null;
+  if (u.lastSuggestionAt === undefined) u.lastSuggestionAt = null;
+  if (!u.suggestionSessionCounts || typeof u.suggestionSessionCounts !== 'object') {
+    u.suggestionSessionCounts = {};
+  }
+  if (u.lastInitiativeAt === undefined) u.lastInitiativeAt = null;
+  if (!u.initiativeSessionCounts || typeof u.initiativeSessionCounts !== 'object') {
+    u.initiativeSessionCounts = {};
+  }
+  return u;
 }
 
 function getUserMemory(userId) {
@@ -87,6 +109,107 @@ function getRecentConversations(userId, limit = 3) {
   return user.pastInteractions.slice(-Math.max(1, limit));
 }
 
+/** Milliseconds since last user message started (Infinity if first time). Call before markInteractionStart. */
+function getInteractionGapMs(userId) {
+  const user = ensureUser(userId);
+  const prev = user.lastInteractionAt;
+  if (!prev || typeof prev !== 'string') return Infinity;
+  const t = new Date(prev).getTime();
+  if (Number.isNaN(t)) return Infinity;
+  return Math.max(0, Date.now() - t);
+}
+
+/** Mark the start of a new user turn (for suggestion timing). */
+function markInteractionStart(userId) {
+  const user = ensureUser(userId);
+  user.lastInteractionAt = new Date().toISOString();
+  persistMemory();
+}
+
+function getSuggestionSessionCount(userId, sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return 0;
+  const k = sessionId.trim().slice(0, 128);
+  if (!k) return 0;
+  const user = ensureUser(userId);
+  return Number(user.suggestionSessionCounts[k]) || 0;
+}
+
+/** After returning a non-null next-action suggestion to the client. */
+function recordSuggestionDelivered(userId, sessionId) {
+  const user = ensureUser(userId);
+  user.lastSuggestionAt = new Date().toISOString();
+  if (sessionId && typeof sessionId === 'string') {
+    const k = sessionId.trim().slice(0, 128);
+    if (k) {
+      user.suggestionSessionCounts[k] = (Number(user.suggestionSessionCounts[k]) || 0) + 1;
+    }
+  }
+  const keys = Object.keys(user.suggestionSessionCounts);
+  if (keys.length > 24) {
+    keys.slice(0, keys.length - 24).forEach((key) => {
+      delete user.suggestionSessionCounts[key];
+    });
+  }
+  persistMemory();
+}
+
+function getInitiativeSessionCount(userId, sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return 0;
+  const k = sessionId.trim().slice(0, 128);
+  if (!k) return 0;
+  const user = ensureUser(userId);
+  return Number(user.initiativeSessionCounts[k]) || 0;
+}
+
+function recordInitiativeDelivered(userId, sessionId) {
+  const user = ensureUser(userId);
+  user.lastInitiativeAt = new Date().toISOString();
+  if (sessionId && typeof sessionId === 'string') {
+    const k = sessionId.trim().slice(0, 128);
+    if (k) {
+      user.initiativeSessionCounts[k] = (Number(user.initiativeSessionCounts[k]) || 0) + 1;
+    }
+  }
+  const keys = Object.keys(user.initiativeSessionCounts);
+  if (keys.length > 24) {
+    keys.slice(0, keys.length - 24).forEach((key) => {
+      delete user.initiativeSessionCounts[key];
+    });
+  }
+  persistMemory();
+}
+
+/**
+ * Update mood tallies + topic hints from one classification pass per user turn.
+ * @param {string} userId
+ * @param {{ mood?: string, topicHints?: string[] }} signals
+ */
+function recordCompanionSignals(userId, signals) {
+  const user = ensureUser(userId);
+  const allowed = new Set(['tired', 'stressed', 'happy', 'neutral']);
+  const mood = allowed.has(String(signals?.mood || '').toLowerCase())
+    ? String(signals.mood).toLowerCase()
+    : 'neutral';
+  user.moodCounts[mood] = (user.moodCounts[mood] || 0) + 1;
+  user.lastMood = mood;
+  user.lastMoodAt = new Date().toISOString();
+
+  const hints = Array.isArray(signals?.topicHints) ? signals.topicHints : [];
+  const freq = Array.isArray(user.frequentTopics) ? [...user.frequentTopics] : [];
+  for (const raw of hints.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 4)) {
+    const label = raw.slice(0, 48);
+    const idx = freq.findIndex((t) => String(t.label || '').toLowerCase() === label.toLowerCase());
+    if (idx >= 0) {
+      freq[idx] = { label: freq[idx].label, count: (freq[idx].count || 1) + 1 };
+    } else {
+      freq.push({ label, count: 1 });
+    }
+  }
+  user.frequentTopics = freq.sort((a, b) => (b.count || 0) - (a.count || 0)).slice(0, 14);
+  persistMemory();
+  return user;
+}
+
 loadMemoryFromDisk();
 
 module.exports = {
@@ -95,4 +218,11 @@ module.exports = {
   appendConversation,
   getRecentConversations,
   recordProactiveSent,
+  recordCompanionSignals,
+  getInteractionGapMs,
+  markInteractionStart,
+  getSuggestionSessionCount,
+  recordSuggestionDelivered,
+  getInitiativeSessionCount,
+  recordInitiativeDelivered,
 };

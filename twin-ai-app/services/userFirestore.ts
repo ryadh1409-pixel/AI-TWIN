@@ -114,6 +114,22 @@ export async function saveUserNotificationPrefs(
   );
 }
 
+/** Persist Expo push token for Cloud Functions → Expo Push API (`sendReminderNotification`). */
+export async function saveExpoPushToken(uid: string, expoPushToken: string): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  const tok = String(expoPushToken || '').trim().slice(0, 512);
+  if (!tok) return;
+  await setDoc(
+    doc(db, 'users', uid),
+    {
+      expoPushToken: tok,
+      expoPushTokenUpdatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
 export async function loadUserNotificationPrefs(
   uid: string,
 ): Promise<NotificationPrefs | null> {

@@ -24,6 +24,22 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="decide"
+        options={{
+          title: 'Decision',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={28} name="lightbulb.fill" color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="insights"
+        options={{
+          title: 'Insights',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="sparkles" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="chat"
         options={{
           title: 'Chat',

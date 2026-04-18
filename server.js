@@ -234,7 +234,9 @@ app.post("/ask", upload.none(), async (req, res) => {
       return res.status(500).json({ error: "Missing OPENAI_API_KEY." });
     }
 
-    const question = String(req.body?.question || "").trim();
+    const question = String(
+      req.body?.message || req.body?.question || "",
+    ).trim();
     const userId = normalizeUserId(req.body?.userId);
 
     if (!question) {
@@ -258,6 +260,16 @@ app.post("/ask", upload.none(), async (req, res) => {
     }
 
     const history = getSessionHistory(userId);
+    const clientPairs = Array.isArray(req.body?.conversationHistory)
+      ? req.body.conversationHistory
+      : [];
+    const clientMsgs = [];
+    for (const p of clientPairs.slice(-5)) {
+      const u = String(p?.message ?? "").trim();
+      const a = String(p?.response ?? "").trim();
+      if (u) clientMsgs.push({ role: "user", content: u.slice(0, 8000) });
+      if (a) clientMsgs.push({ role: "assistant", content: a.slice(0, 8000) });
+    }
 
     let systemContent = systemPrompt;
     if (ragContext) {
@@ -267,6 +279,7 @@ app.post("/ask", upload.none(), async (req, res) => {
     /** @type {import('openai').OpenAI.ChatCompletionMessageParam[]} */
     const messages = [
       { role: "system", content: systemContent },
+      ...clientMsgs,
       ...history.map((m) => ({
         role: m.role,
         content: m.content,
