@@ -48,7 +48,7 @@
     "ext": "js,json"
   },
   "version": "1.0.0",
-  "description": "",
+  "description": "Monorepo root: prefer `npm run app` (twin-ai-app). Root App.tsx + metro.config.js also allow `expo start` here.",
   "main": "node_modules/expo/AppEntry.js",
   "repository": {
     "type": "git",
