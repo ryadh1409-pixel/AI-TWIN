@@ -459,7 +459,27 @@ export type VoicePerson =
   | 'brother'
   | 'grandma'
   | 'grandpa'
-  | 'friend';
+  | 'friend'
+  | 'maher'
+  | 'mjeed';
+
+/** Values accepted by the hosted TTS service (Cloud Run). */
+export type TtsVoicePerson = 'mom' | 'dad' | 'maher' | 'mjeed';
+
+/**
+ * Maps app/chat personas to TTS `person`. Unknown or legacy values → `maher` (default voice).
+ */
+export function normalizeTtsPerson(person: VoicePerson | string): TtsVoicePerson {
+  const k = String(person || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+  if (k === 'mom' || k === 'mother') return 'mom';
+  if (k === 'dad' || k === 'father') return 'dad';
+  if (k === 'maher') return 'maher';
+  if (k === 'mjeed') return 'mjeed';
+  return 'maher';
+}
 
 export type AudioPayload = {
   audioBase64: string;
@@ -854,12 +874,13 @@ export async function askTwinVision(
 
 export async function textToSpeech(
   text: string,
-  person: VoicePerson = 'twin',
+  person: VoicePerson = 'maher',
 ): Promise<AudioPayload> {
   const trimmed = String(text ?? '').trim();
   if (!trimmed) {
     throw new Error('textToSpeech: empty text');
   }
+  const ttsPerson = normalizeTtsPerson(person);
   try {
     const idToken = await getFirebaseIdToken();
     const ttsNeedsAuth = /\.run\.app|720055631944/.test(TTS_URL);
@@ -872,11 +893,15 @@ export async function textToSpeech(
       ...JSON_HEADERS,
       ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
     };
-    console.log('[api] POST /tts start', { url: TTS_URL, person, hasAuth: Boolean(idToken) });
+    console.log('[api] POST /tts start', {
+      url: TTS_URL,
+      person: ttsPerson,
+      hasAuth: Boolean(idToken),
+    });
     const res = await fetch(TTS_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ text: trimmed, person }),
+      body: JSON.stringify({ text: trimmed, person: ttsPerson }),
     });
     const raw = await res.text();
     console.log('[api] POST /tts response', { status: res.status, bytes: raw.length });
@@ -1125,9 +1150,10 @@ export async function sendAutonomousAgentMessage(
 
 export async function synthesizeSpeech(
   _idToken: string,
-  _character: Character,
+  character: Character,
   text: string,
 ): Promise<AudioPayload> {
-  void _character;
-  return textToSpeech(text, 'twin');
+  const voice: VoicePerson =
+    character === 'family' ? 'maher' : character;
+  return textToSpeech(text, voice);
 }

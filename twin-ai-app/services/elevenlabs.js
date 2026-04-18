@@ -116,7 +116,7 @@ export async function speak(text, callbacks = {}) {
   }
 
   try {
-    const payload = await textToSpeech(trimmed, 'twin');
+    const payload = await textToSpeech(trimmed, 'maher');
     const uri = `data:${payload.audioMimeType};base64,${payload.audioBase64}`;
     onPlaybackStart?.();
     await playUriWithLifecycle(uri, onPlaybackEnd);
