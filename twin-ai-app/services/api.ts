@@ -698,7 +698,7 @@ export async function sendProactiveContextCheck(
 
 export async function sendChat(
   message: string,
-  _person: VoicePerson = 'twin',
+  _person: VoicePerson = 'maher',
   _location?: LatLng | null,
   options?: {
     userId?: string;
@@ -938,7 +938,7 @@ export async function textToSpeech(
 
 export const transcribeAudio = async (
   uri: string,
-  _person: VoicePerson = 'twin',
+  _person: VoicePerson = 'maher',
 ): Promise<TranscribeResult> => {
   void _person;
   if (!uri) throw new Error('Missing recording URI.');
