@@ -58,7 +58,7 @@ function createDecideApp(openaiApiKey, requireAuth) {
   const app = express();
   app.disable("x-powered-by");
   app.use(cors({ origin: true }));
-  app.options("*", cors({ origin: true }));
+  app.options("/{*splat}", cors({ origin: true }));
   app.use(express.json({ limit: "128kb" }));
 
   const runDecide = async (req, res) => {

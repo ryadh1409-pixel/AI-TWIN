@@ -809,7 +809,10 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+// Express 5 + path-to-regexp v6: do not use `app.options('*', …)` or `app.options('/*', …)` —
+// they throw PathError ("Missing parameter name…"). Use a named splat, e.g.
+// `app.options('/{*splat}', cors(corsOptions))`, only if you need an explicit
+// catch-all; `app.use(cors(...))` already handles preflight for this app.
 app.use(express.json({ limit: '1mb' }));
 
 app.use((req, res, next) => {

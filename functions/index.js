@@ -175,7 +175,7 @@ exports.transcribe = onRequest(
 const chatApp = express();
 chatApp.disable("x-powered-by");
 chatApp.use(cors({ origin: true }));
-chatApp.options("*", cors({ origin: true }));
+chatApp.options("/{*splat}", cors({ origin: true }));
 chatApp.use(express.json({ limit: "1mb" }));
 chatApp.post("/", requireAuth, createChatHandler(OpenAI, openaiApiKey));
 chatApp.post("/chat", requireAuth, createChatHandler(OpenAI, openaiApiKey));
@@ -222,7 +222,7 @@ function normalizeForSpeech(text) {
 const ttsApp = express();
 ttsApp.disable("x-powered-by");
 ttsApp.use(cors({ origin: true }));
-ttsApp.options("*", cors({ origin: true }));
+ttsApp.options("/{*splat}", cors({ origin: true }));
 ttsApp.use(express.json({ limit: "1mb" }));
 
 ttsApp.post("/", requireAuth, async (req, res) => {
@@ -331,7 +331,7 @@ exports.dailyNewsDigest = onSchedule(
 const sleepStoryApp = express();
 sleepStoryApp.disable("x-powered-by");
 sleepStoryApp.use(cors({ origin: true }));
-sleepStoryApp.options("*", cors({ origin: true }));
+sleepStoryApp.options("/{*splat}", cors({ origin: true }));
 sleepStoryApp.use(express.json({ limit: "256kb" }));
 
 async function sleepStoryHandler(req, res) {
@@ -373,7 +373,7 @@ exports.sleepStory = onRequest(
 const getNewsApp = express();
 getNewsApp.disable("x-powered-by");
 getNewsApp.use(cors({ origin: true }));
-getNewsApp.options("*", cors({ origin: true }));
+getNewsApp.options("/{*splat}", cors({ origin: true }));
 getNewsApp.use(express.json({ limit: "256kb" }));
 
 async function getNewsHandler(req, res) {

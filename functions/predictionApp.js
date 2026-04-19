@@ -73,7 +73,7 @@ function createPredictionApp(openaiApiKey, requireAuth) {
   const app = express();
   app.disable("x-powered-by");
   app.use(cors({ origin: true }));
-  app.options("*", cors({ origin: true }));
+  app.options("/{*splat}", cors({ origin: true }));
   app.use(express.json({ limit: "128kb" }));
 
   app.post("/generate", requireAuth, async (req, res) => {
