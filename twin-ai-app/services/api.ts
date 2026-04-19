@@ -20,6 +20,34 @@ export async function getFirebaseIdToken(): Promise<string | null> {
   }
 }
 
+/** Returns current Firebase Auth uid (or null if not signed in). */
+export function getCurrentUid(): string | null {
+  try {
+    const auth = getFirebaseAuth();
+    return auth?.currentUser?.uid || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch wrapper that always attaches `Authorization: Bearer <id_token>`.
+ * Throws if the user is not signed in, so callers can surface a clear error.
+ */
+export async function authedFetch(
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const idToken = await getFirebaseIdToken();
+  if (!idToken) {
+    throw new Error('Not signed in. Please sign in with Firebase Auth first.');
+  }
+  const headers = new Headers(init.headers || {});
+  headers.set('Authorization', `Bearer ${idToken}`);
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json');
+  return fetch(url, { ...init, headers });
+}
+
 /**
  * Local dev: use your machine's LAN IP so a physical phone can reach Node
  * (replace 192.168.1.100 with your Wi‑Fi IP). Root `server.js` listens on :3000.
@@ -139,10 +167,10 @@ export type DecisionJsonResult = {
 export async function analyzeDecisionJson(userInput: string): Promise<DecisionJsonResult> {
   const trimmed = String(userInput || '').trim();
   if (!trimmed) throw new Error('Empty user_input.');
-  const res = await fetch(DECISION_JSON_URL, {
+  const res = await authedFetch(DECISION_JSON_URL, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
-    body: JSON.stringify({ user_input: trimmed }),
+    body: JSON.stringify({ user_input: trimmed, userId: getCurrentUid() }),
   });
   const raw = await res.text();
   if (!res.ok) {
@@ -408,10 +436,10 @@ export async function postGeneratePrediction(
 export async function analyzeDecisionAdvisor(userInput: string): Promise<{ markdown: string }> {
   const trimmed = String(userInput || '').trim();
   if (!trimmed) throw new Error('Empty user_input.');
-  const res = await fetch(DECISION_ADVISOR_URL, {
+  const res = await authedFetch(DECISION_ADVISOR_URL, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
-    body: JSON.stringify({ user_input: trimmed }),
+    body: JSON.stringify({ user_input: trimmed, userId: getCurrentUid() }),
   });
   const raw = await res.text();
   if (!res.ok) {
@@ -424,10 +452,10 @@ export async function extractTopicsFromUserMessage(message: string): Promise<str
   const trimmed = String(message || '').trim();
   if (!trimmed) return [];
   try {
-    const res = await fetch(EXTRACT_TOPICS_URL, {
+    const res = await authedFetch(EXTRACT_TOPICS_URL, {
       method: 'POST',
       headers: { ...JSON_HEADERS },
-      body: JSON.stringify({ message: trimmed.slice(0, 4000) }),
+      body: JSON.stringify({ message: trimmed.slice(0, 4000), userId: getCurrentUid() }),
     });
     const raw = await res.text();
     if (!res.ok) return [];
@@ -564,7 +592,7 @@ export async function postJsonMessage(
 ): Promise<Record<string, unknown>> {
   try {
     const body = { message, ...extras };
-    const res = await fetch(url, {
+    const res = await authedFetch(url, {
       method: 'POST',
       headers: { ...JSON_HEADERS },
       body: JSON.stringify(body),
@@ -624,7 +652,7 @@ export type CompanionInitiativeResult = {
 export async function fetchCompanionInitiative(
   payload: CompanionInitiativePayload,
 ): Promise<CompanionInitiativeResult> {
-  const res = await fetch(COMPANION_INITIATIVE_URL, {
+  const res = await authedFetch(COMPANION_INITIATIVE_URL, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
     body: JSON.stringify(payload),
@@ -678,7 +706,7 @@ export async function sendProactiveContextCheck(
   payload: ProactiveContextPayload,
 ): Promise<ProactiveResult> {
   try {
-    const res = await fetch(PROACTIVE_URL, {
+    const res = await authedFetch(PROACTIVE_URL, {
       method: 'POST',
       headers: { ...JSON_HEADERS },
       body: JSON.stringify(payload),
@@ -744,13 +772,13 @@ export async function uploadTwinText(
   if (!trimmed) {
     throw new Error('uploadTwinText: empty text');
   }
-  const uid = userId.trim() || 'local-user';
+  const uid = userId.trim() || getCurrentUid() || 'local-user';
   try {
     console.log('[api] POST /upload start', { url: UPLOAD_URL, userId: uid });
-    const res = await fetch(UPLOAD_URL, {
+    const res = await authedFetch(UPLOAD_URL, {
       method: 'POST',
       headers: { ...JSON_HEADERS },
-      body: JSON.stringify({ message: trimmed }),
+      body: JSON.stringify({ message: trimmed, text: trimmed, userId: uid }),
     });
     const raw = await res.text();
     console.log('[api] POST /upload response', { status: res.status, raw });
@@ -769,7 +797,7 @@ export async function uploadTwinPdf(
   userId: string,
   file: { uri: string; name?: string; mimeType?: string },
 ): Promise<{ ok: true; chunks: number }> {
-  const uid = userId.trim() || 'local-user';
+  const uid = userId.trim() || getCurrentUid() || 'local-user';
   const formData = new FormData();
   formData.append('userId', uid);
   formData.append('file', {
@@ -779,7 +807,7 @@ export async function uploadTwinPdf(
   } as any);
   try {
     console.log('[api] POST /upload-pdf start', { url: UPLOAD_PDF_URL, userId: uid });
-    const res = await fetch(UPLOAD_PDF_URL, {
+    const res = await authedFetch(UPLOAD_PDF_URL, {
       method: 'POST',
       body: formData,
       headers: {
@@ -807,7 +835,7 @@ export async function askTwinRag(
   userId: string,
   question: string,
 ): Promise<{ answer: string }> {
-  const uid = userId.trim() || 'local-user';
+  const uid = userId.trim() || getCurrentUid() || 'local-user';
   const q = question.trim();
   if (!q) {
     throw new Error('askTwinRag: empty question');
@@ -833,7 +861,7 @@ export async function askTwinVision(
   image: { uri: string; name?: string; mimeType?: string },
   question?: string,
 ): Promise<{ answer: string }> {
-  const uid = userId.trim() || 'local-user';
+  const uid = userId.trim() || getCurrentUid() || 'local-user';
   const formData = new FormData();
   formData.append('userId', uid);
   formData.append('image', {
@@ -848,7 +876,7 @@ export async function askTwinVision(
   formData.append('question', q);
   try {
     console.log('[api] POST /ask-vision start', { url: ASK_VISION_URL, userId: uid });
-    const res = await fetch(ASK_VISION_URL, {
+    const res = await authedFetch(ASK_VISION_URL, {
       method: 'POST',
       body: formData,
       headers: {
@@ -882,25 +910,10 @@ export async function textToSpeech(
   }
   const ttsPerson = normalizeTtsPerson(person);
   try {
-    const idToken = await getFirebaseIdToken();
-    const ttsNeedsAuth = /\.run\.app|720055631944/.test(TTS_URL);
-    if (ttsNeedsAuth && !idToken) {
-      throw new Error(
-        'Voice output requires a signed-in user. Sign in with Firebase and try again.',
-      );
-    }
-    const headers: Record<string, string> = {
-      ...JSON_HEADERS,
-      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-    };
-    console.log('[api] POST /tts start', {
-      url: TTS_URL,
-      person: ttsPerson,
-      hasAuth: Boolean(idToken),
-    });
-    const res = await fetch(TTS_URL, {
+    console.log('[api] POST /tts start', { url: TTS_URL, person: ttsPerson });
+    const res = await authedFetch(TTS_URL, {
       method: 'POST',
-      headers,
+      headers: { ...JSON_HEADERS },
       body: JSON.stringify({ text: trimmed, person: ttsPerson }),
     });
     const raw = await res.text();
@@ -950,8 +963,10 @@ export const transcribeAudio = async (
     name: 'audio.m4a',
     type: 'audio/m4a',
   } as any);
+  const uidForForm = getCurrentUid();
+  if (uidForForm) formData.append('userId', uidForForm);
 
-  const res = await fetch(TRANSCRIBE_URL, {
+  const res = await authedFetch(TRANSCRIBE_URL, {
     method: 'POST',
     body: formData,
     headers: {
@@ -982,12 +997,13 @@ export async function postVoicePersonChat(
   const trimmed = String(message || '').trim();
   if (!trimmed) throw new Error('postVoicePersonChat: empty message.');
   const url = companionChatPostUrl();
-  const res = await fetch(url, {
+  const res = await authedFetch(url, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
     body: JSON.stringify({
       message: trimmed,
       person,
+      userId: getCurrentUid(),
       /** Hint for persona /chat — server defaults to Arabic-first prompts. */
       language: 'ar',
     }),
@@ -1028,7 +1044,7 @@ export async function sendChatMessage(
   if (retentionContext) body.retentionContext = retentionContext;
 
   console.log('[api] POST plan-and-run', { url: PLAN_AND_RUN_URL });
-  const res = await fetch(PLAN_AND_RUN_URL, {
+  const res = await authedFetch(PLAN_AND_RUN_URL, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
     body: JSON.stringify(body),
@@ -1101,7 +1117,7 @@ export async function sendAutonomousAgentMessage(
   if (retentionContext) body.retentionContext = retentionContext;
 
   console.log('[api] POST agent/autonomous', { url: AUTONOMOUS_AGENT_URL });
-  const res = await fetch(AUTONOMOUS_AGENT_URL, {
+  const res = await authedFetch(AUTONOMOUS_AGENT_URL, {
     method: 'POST',
     headers: { ...JSON_HEADERS },
     body: JSON.stringify(body),

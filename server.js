@@ -12,6 +12,10 @@ const pdfParse = require("pdf-parse");
 const { RecursiveCharacterTextSplitter } = require("@langchain/textsplitters");
 const { OpenAIEmbeddings } = require("@langchain/openai");
 const { FaissStore } = require("@langchain/community/vectorstores/faiss");
+const {
+  requireAuth,
+  enforceUserId,
+} = require("./twin-ai-app/server/middleware/requireAuth");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const EMBEDDING_MODEL = "text-embedding-3-small";
@@ -30,8 +34,7 @@ const uploadPdfMemory = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
 });
 /** Same Express app as twin-ai-app/server/index.js (required below).
- *  POST /ask-vision is registered on that app (see twin-ai-app/server/index.js).
- *  POST /tts is also registered there and intentionally does not require auth middleware.
+ *  Sensitive routes (e.g. POST /ask, /chat, /tts) use Firebase auth — see `middleware/requireAuth`.
  */
 const app = require("./twin-ai-app/server/index.js");
 
@@ -106,17 +109,18 @@ async function ingestTextForUser(userId, text, meta = {}) {
 }
 
 // --- RAG routes (registered on the same `app` as /chat, etc.) ---
-app.post("/upload", upload.none(), async (req, res) => {
+app.post("/upload", requireAuth, upload.none(), enforceUserId, async (req, res) => {
   try {
     if (!OPENAI_API_KEY) {
       return res.status(500).json({ error: "Missing OPENAI_API_KEY." });
     }
 
     const text = String(req.body?.text || "").trim();
+    // enforceUserId already set req.body.userId = req.auth.uid
     const userId = normalizeUserId(req.body?.userId);
 
-    if (!userId) {
-      return res.status(400).json({ error: "Missing userId." });
+    if (!userId || userId !== req.auth.uid) {
+      return res.status(400).json({ error: "Invalid userId." });
     }
 
     const { chunks, indexDir } = await ingestTextForUser(userId, text, {});
@@ -142,15 +146,21 @@ app.post("/upload", upload.none(), async (req, res) => {
   }
 });
 
-app.post("/upload-pdf", uploadPdfMemory.single("file"), async (req, res) => {
+app.post(
+  "/upload-pdf",
+  requireAuth,
+  uploadPdfMemory.single("file"),
+  enforceUserId,
+  async (req, res) => {
   try {
     if (!OPENAI_API_KEY) {
       return res.status(500).json({ error: "Missing OPENAI_API_KEY." });
     }
 
+    // enforceUserId already set req.body.userId = req.auth.uid
     const userId = normalizeUserId(req.body?.userId);
-    if (!userId) {
-      return res.status(400).json({ error: "Missing userId." });
+    if (!userId || userId !== req.auth.uid) {
+      return res.status(400).json({ error: "Invalid userId." });
     }
 
     if (!req.file?.buffer) {
