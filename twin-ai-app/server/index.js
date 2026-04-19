@@ -39,6 +39,11 @@ const { analyzeUserSignals } = require('./companionSignals');
 const { runAgent } = require('./agent/autonomousAgent');
 const { runDecisionJson, runStartupAdvisorMarkdown } = require('./decisionEngine');
 const { updateUserProfile } = require('./userProfileLearn');
+const { requireAuth, enforceUserId } = require('./middleware/requireAuth');
+const { initFirebaseAdmin } = require('../../server/agent/firebase');
+
+// Initialize firebase-admin eagerly so requireAuth can verify ID tokens.
+initFirebaseAdmin();
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
@@ -782,7 +787,29 @@ async function generateCompanionReply({
   return { ...out, profileSignals, interactionGapMs };
 }
 
-app.use(cors({ origin: true }));
+// --- CORS: strict allowlist from env (CORS_ORIGINS=comma,separated,origins) ---
+const CORS_ALLOWLIST = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, cb) {
+    // Same-origin / native apps / curl send no Origin header — allow them.
+    if (!origin) return cb(null, true);
+    if (CORS_ALLOWLIST.includes('*')) return cb(null, true);
+    if (CORS_ALLOWLIST.includes(origin)) return cb(null, true);
+    console.warn(`[cors] blocked origin: ${origin}`);
+    return cb(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 600,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 app.use((req, res, next) => {
@@ -805,7 +832,7 @@ app.get('/', (_req, res) => {
  * Note: FAISS uploads live on root server when using `node server.js`; this handler answers
  * with OpenAI + in-memory session + client conversationHistory (no server-side FAISS here).
  */
-app.post('/ask', async (req, res) => {
+app.post('/ask', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -870,7 +897,7 @@ app.post('/ask', async (req, res) => {
   }
 });
 
-app.post('/agent/decide', async (req, res) => {
+app.post('/agent/decide', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1093,7 +1120,7 @@ function mergeRetentionPrefixes(retentionBlock) {
   return raw;
 }
 
-app.post('/agent/plan-and-run', async (req, res) => {
+app.post('/agent/plan-and-run', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1277,7 +1304,7 @@ app.post('/agent/plan-and-run', async (req, res) => {
   }
 });
 
-app.post('/agent/autonomous', async (req, res) => {
+app.post('/agent/autonomous', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1406,7 +1433,7 @@ app.post('/agent/autonomous', async (req, res) => {
 });
 
 /** Agent core (Expo `runAgent`): short OpenAI replies using client-loaded memory. */
-app.post('/agent/core/generate', async (req, res) => {
+app.post('/agent/core/generate', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1487,7 +1514,7 @@ ${memoryStr}`;
 });
 
 /** Weighted decision matrix → JSON + Arabic explanation (see `decisionEnginePrompts.js`). */
-app.post('/agent/decision-json', async (req, res) => {
+app.post('/agent/decision-json', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1520,7 +1547,7 @@ app.post('/agent/decision-json', async (req, res) => {
 });
 
 /** Full startup-advisor markdown report (see `decisionEnginePrompts.js`). */
-app.post('/agent/decision-advisor', async (req, res) => {
+app.post('/agent/decision-advisor', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1671,10 +1698,10 @@ async function handleCompanionChat(req, res) {
   }
 }
 
-app.post('/chat', handleCompanionChat);
-app.post('/', handleCompanionChat);
+app.post('/chat', requireAuth, enforceUserId, handleCompanionChat);
+app.post('/', requireAuth, enforceUserId, handleCompanionChat);
 
-app.post('/transcribe', upload.single('file'), async (req, res) => {
+app.post('/transcribe', requireAuth, upload.single('file'), enforceUserId, async (req, res) => {
   try {
     console.log('[transcribe] called', {
       hasFile: Boolean(req.file),
@@ -1695,7 +1722,7 @@ app.post('/transcribe', upload.single('file'), async (req, res) => {
 });
 
 // Public local TTS endpoint: no Firebase auth token/middleware required.
-app.post('/tts', async (req, res) => {
+app.post('/tts', requireAuth, enforceUserId, async (req, res) => {
   try {
     const rawText =
       typeof req.body?.text === 'string'
@@ -1724,7 +1751,7 @@ app.post('/tts', async (req, res) => {
   }
 });
 
-app.post('/proactive', async (req, res) => {
+app.post('/proactive', requireAuth, enforceUserId, async (req, res) => {
   try {
     const result = await handleProactiveRequest(req.body || {});
     return res.status(200).json(result);
@@ -1805,7 +1832,7 @@ Reply with the line only — no quotes.`,
   return line;
 }
 
-app.post('/agent/extract-topics', async (req, res) => {
+app.post('/agent/extract-topics', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1844,7 +1871,7 @@ app.post('/agent/extract-topics', async (req, res) => {
   }
 });
 
-app.post('/companion/smart-suggest', async (req, res) => {
+app.post('/companion/smart-suggest', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'OpenAI not configured.' });
@@ -1888,7 +1915,7 @@ app.post('/companion/smart-suggest', async (req, res) => {
   }
 });
 
-app.post('/companion/initiative', async (req, res) => {
+app.post('/companion/initiative', requireAuth, enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(200).json({ shouldInitiate: false, reason: 'no_openai' });
@@ -1974,7 +2001,7 @@ app.post('/companion/initiative', async (req, res) => {
   }
 });
 
-app.post('/chat-audio', upload.single('file'), async (req, res) => {
+app.post('/chat-audio', requireAuth, upload.single('file'), enforceUserId, async (req, res) => {
   try {
     const userId = getUserId(req.body?.userId);
     if (!req.file) {
@@ -2025,7 +2052,7 @@ app.post('/chat-audio', upload.single('file'), async (req, res) => {
  * Registered here so this file works when run directly (`node twin-ai-app/server/index.js`);
  * root `server.js` uses the same `app` instance and does not register this again.
  */
-app.post('/ask-vision', upload.single('image'), async (req, res) => {
+app.post('/ask-vision', requireAuth, upload.single('image'), enforceUserId, async (req, res) => {
   try {
     if (!openai) {
       return res.status(500).json({ error: 'Missing OPENAI_API_KEY.' });
