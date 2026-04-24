@@ -27,7 +27,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import type { VoicePerson } from '@/services/api';
+import type { ChatPersona } from '@/services/api';
 import {
   askTwinRag,
   askTwinVision,
@@ -41,7 +41,7 @@ import { playAudioFromBase64 } from '@/services/voicePlayback';
 const USER_ID = 'local-user';
 const MAX_MESSAGES = 20;
 /** Persona for voice: record → /transcribe → /chat → /tts (server ElevenLabs). */
-const VOICE_CHAT_PERSON: VoicePerson = 'twin';
+const VOICE_CHAT_PERSON: ChatPersona = 'twin';
 
 type ChatMessage = {
   id: string;

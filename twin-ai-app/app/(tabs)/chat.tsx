@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { isFirebaseConfigured } from '@/lib/firebase';
 import { playBase64Mp3 } from '@/services/audioPlayback';
 import {
+  normalizeTtsPerson,
   sendChatMessage,
   API_URL,
   synthesizeSpeech,
@@ -161,7 +162,7 @@ export default function ChatScreen() {
           (TTS_URL
             ? await synthesizeSpeech(
                 token,
-                character as Exclude<Character, 'family'>,
+                normalizeTtsPerson(character),
                 result.reply,
               )
             : null);

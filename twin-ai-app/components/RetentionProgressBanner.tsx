@@ -16,8 +16,7 @@ export function RetentionProgressBanner() {
 
   return (
     <View
-      style={[styles.wrap, { top: Math.max(insets.top, 8) + 2 }]}
-      pointerEvents="none"
+      style={[styles.wrap, { top: Math.max(insets.top, 8) + 2 }, { pointerEvents: 'none' }]}
       accessibilityRole="text">
       <Text style={styles.text}>
         {streakLabel}

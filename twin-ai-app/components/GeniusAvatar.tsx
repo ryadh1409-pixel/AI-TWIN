@@ -113,9 +113,9 @@ export function GeniusAvatar({ mode, size = 45, showLabel = true }: Props) {
       <View style={[styles.wrap, { width: size + 14, height: size + 14 }]}>
         {mode === 'speaking' ? (
           <Animated.View
-            pointerEvents="none"
             style={[
               styles.speakRing,
+              { pointerEvents: 'none' },
               {
                 width: size + 14,
                 height: size + 14,
@@ -154,19 +154,13 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     borderWidth: 3,
     borderColor: '#FF6B00',
-    shadowColor: '#FF6B00',
-    shadowOpacity: 0.95,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 0 },
+    boxShadow: '0px 0px 12px rgba(255, 107, 0, 0.95)',
     elevation: 8,
   },
   gradient: {
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#FF6B00',
-    shadowOpacity: 0.55,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 0 },
+    boxShadow: '0px 0px 8px rgba(255, 107, 0, 0.55)',
     elevation: 5,
   },
   emoji: {},

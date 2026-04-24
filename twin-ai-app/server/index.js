@@ -47,17 +47,23 @@ initFirebaseAdmin();
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+const openaiTts = require('./openaiTts');
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
 
 const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1';
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+const _openaiKeyCheck = openaiTts.validateOpenAiApiKey(OPENAI_API_KEY);
+const openai = _openaiKeyCheck.ok ? new OpenAI({ apiKey: _openaiKeyCheck.key }) : null;
+if (process.env.OPENAI_API_KEY && !_openaiKeyCheck.ok) {
+  console.warn('[openai]', _openaiKeyCheck.message);
+}
 /** Same as root `server.js` RAG /ask (Cloud Run often runs this file without server.js). */
 const OPENAI_ASK_MODEL =
   process.env.OPENAI_ASK_MODEL ||
@@ -670,6 +676,72 @@ async function synthesizeWithElevenLabs(text, personOrVoiceKey = 'twin') {
   };
 }
 
+/**
+ * Server-side TTS: OpenAI (preferred, key in env) or ElevenLabs fallback.
+ * Never call OpenAI from the Expo app — only this server uses the secret key.
+ */
+async function synthesizeTtsResponse(text, { body, personKey } = {}) {
+  const character = openaiTts.resolveTtsCharacter(
+    body && typeof body === 'object' ? body : { person: personKey || 'mom' },
+  );
+  if (!openaiTts.VOICE_BY_CHARACTER[character]) {
+    const raw =
+      body && typeof body === 'object'
+        ? body.character ?? body.person ?? body.voice
+        : personKey;
+    console.warn('[tts] rejected character', { raw, normalized: character });
+    const err = new Error('Invalid character. Use mom, dad, maher, or mjeed.');
+    err.httpStatus = 400;
+    err.code = 'TTS_INVALID_CHARACTER';
+    throw err;
+  }
+
+  const keyCheck = openaiTts.validateOpenAiApiKey(OPENAI_API_KEY);
+  if (keyCheck.ok && openai) {
+    try {
+      return await openaiTts.synthesizeOpenAiTts(
+        openai,
+        normalizeForSpeech(text),
+        character,
+      );
+    } catch (err) {
+      const mapped = openaiTts.mapOpenAiTtsHttpError(err);
+      const e = new Error(mapped.message);
+      e.httpStatus = mapped.httpStatus;
+      e.code = mapped.code;
+      e.upstreamStatus = mapped.upstreamStatus;
+      throw e;
+    }
+  }
+
+  if (ELEVENLABS_API_KEY) {
+    const pk =
+      personKey != null && String(personKey).trim() !== ''
+        ? personKey
+        : normalizePersonKey(
+            typeof body?.person === 'string'
+              ? body.person
+              : typeof body?.character === 'string'
+                ? body.character
+                : 'twin',
+          );
+    return synthesizeWithElevenLabs(text, pk);
+  }
+
+  const err = new Error(
+    keyCheck.ok
+      ? 'OpenAI TTS is unavailable (client not initialized). Check OPENAI_API_KEY.'
+      : keyCheck.message,
+  );
+  err.httpStatus = 503;
+  err.code = 'TTS_NOT_CONFIGURED';
+  throw err;
+}
+
+async function synthesizeTtsForPlanningAgent(text, personOrVoiceKey = 'twin') {
+  return synthesizeTtsResponse(text, { personKey: personOrVoiceKey });
+}
+
 /** Core companion reply without appending to conversation (for planning agent chat steps). */
 async function runCompanionReplyCore({
   userId,
@@ -1219,7 +1291,7 @@ app.post('/agent/plan-and-run', requireAuth, enforceUserId, async (req, res) => 
       rawLocation: location,
       fetchNews,
       fetchSleepStory,
-      synthesizeWithElevenLabs,
+      synthesizeWithElevenLabs: synthesizeTtsForPlanningAgent,
       runCompanionReplyCore,
       companionContext,
       detectedMood,
@@ -1385,7 +1457,7 @@ app.post('/agent/autonomous', requireAuth, enforceUserId, async (req, res) => {
       rawLocation: location,
       fetchNews: fetchNewsAuto,
       fetchSleepStory: fetchSleepStoryAuto,
-      synthesizeWithElevenLabs,
+      synthesizeWithElevenLabs: synthesizeTtsForPlanningAgent,
       runCompanionReplyCore,
       updateUserMemory,
       extractMemoryData,
@@ -1724,7 +1796,7 @@ app.post('/transcribe', requireAuth, upload.single('file'), enforceUserId, async
   }
 });
 
-// Public local TTS endpoint: no Firebase auth token/middleware required.
+/** POST /tts — OpenAI speech on the server (or ElevenLabs if OpenAI is not configured). Requires Firebase auth. */
 app.post('/tts', requireAuth, enforceUserId, async (req, res) => {
   try {
     const rawText =
@@ -1737,20 +1809,22 @@ app.post('/tts', requireAuth, enforceUserId, async (req, res) => {
     if (!text) {
       return res.status(400).json({ error: 'Missing text (or legacy message).' });
     }
-    const personRaw = typeof req.body?.person === 'string' ? req.body.person.trim() : 'twin';
-    const personKey = normalizePersonKey(personRaw);
-    console.log('[tts] request', { textLen: text.length, person: personKey });
-    const tts = await synthesizeWithElevenLabs(text, personKey);
+    const character = openaiTts.resolveTtsCharacter(req.body);
+    console.log('[tts] request', { textLen: text.length, character });
+    const tts = await synthesizeTtsResponse(text, { body: req.body });
     return res.status(200).json({
       audioBase64: tts.audioBase64,
       mimeType: tts.mimeType,
-      audioMimeType: tts.mimeType,
+      audioMimeType: tts.audioMimeType ?? tts.mimeType,
       voice: tts.voice,
     });
   } catch (error) {
     console.error('[tts] error:', error);
+    const status =
+      typeof error?.httpStatus === 'number' ? error.httpStatus : 500;
+    const code = typeof error?.code === 'string' ? error.code : undefined;
     const message = error instanceof Error ? error.message : 'TTS failed.';
-    return res.status(500).json({ error: message });
+    return res.status(status).json({ error: message, ...(code ? { code } : {}) });
   }
 });
 
@@ -2031,7 +2105,7 @@ app.post('/chat-audio', requireAuth, upload.single('file'), enforceUserId, async
       text: transcript,
       location,
     });
-    const tts = await synthesizeWithElevenLabs(result.reply, personKey);
+    const tts = await synthesizeTtsResponse(result.reply, { personKey });
 
     return res.status(200).json({
       transcript,
@@ -2045,8 +2119,11 @@ app.post('/chat-audio', requireAuth, upload.single('file'), enforceUserId, async
     });
   } catch (error) {
     console.error('/chat-audio error:', error);
+    const status =
+      typeof error?.httpStatus === 'number' ? error.httpStatus : 500;
+    const code = typeof error?.code === 'string' ? error.code : undefined;
     const message = error instanceof Error ? error.message : 'chat-audio failed.';
-    return res.status(500).json({ error: message });
+    return res.status(status).json({ error: message, ...(code ? { code } : {}) });
   }
 });
 

@@ -148,8 +148,11 @@ export function ProactiveLaunchPing() {
 
   return (
     <View
-      style={[styles.bubbleWrap, { bottom: Math.max(insets.bottom, 12) + 56 }]}
-      pointerEvents="box-none"
+      style={[
+        styles.bubbleWrap,
+        { bottom: Math.max(insets.bottom, 12) + 56 },
+        { pointerEvents: 'box-none' },
+      ]}
       accessibilityRole="text"
       accessibilityLabel={`Suggestion: ${bubbleText}`}>
       <View style={styles.bubble}>

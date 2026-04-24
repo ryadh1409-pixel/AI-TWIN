@@ -91,7 +91,7 @@ function isLocalDevApiBase(base: string): boolean {
   );
 }
 
-/** POST /tts — JSON `{ text, person }` (legacy `{ message }` still accepted on server). */
+/** POST /tts — JSON `{ text, person, character }` (legacy `{ message }` still accepted on server). */
 export const TTS_URL =
   trimBase(process.env.EXPO_PUBLIC_TTS_URL) ||
   (isLocalDevApiBase(API_URL_CLEAN)
@@ -476,7 +476,11 @@ function getSuggestionSessionId(): string {
   return suggestionSessionId;
 }
 
-export type VoicePerson =
+/** Keys accepted by hosted /tts (Cloud Function + Cloud Run). */
+export type VoicePerson = 'mom' | 'dad' | 'maher' | 'mjeed';
+
+/** Persona keys for /chat and related APIs (broader than TTS allow-list). */
+export type ChatPersona =
   | 'twin'
   | 'x'
   | 'mom'
@@ -491,22 +495,18 @@ export type VoicePerson =
   | 'maher'
   | 'mjeed';
 
-/** Values accepted by the hosted TTS service (Cloud Run). */
-export type TtsVoicePerson = 'mom' | 'dad' | 'maher' | 'mjeed';
-
 /**
- * Maps app/chat personas to TTS `person`. Unknown or legacy values → `maher` (default voice).
+ * Maps any client label (including Arabic aliases) to a TTS allow-list key.
+ * Default: `mom`.
  */
-export function normalizeTtsPerson(person: VoicePerson | string): TtsVoicePerson {
-  const k = String(person || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '_');
-  if (k === 'mom' || k === 'mother') return 'mom';
-  if (k === 'dad' || k === 'father') return 'dad';
-  if (k === 'maher') return 'maher';
-  if (k === 'mjeed') return 'mjeed';
-  return 'maher';
+export function normalizeTtsPerson(raw: string | ChatPersona | Character): VoicePerson {
+  const s = String(raw ?? '').trim();
+  const k = s.toLowerCase().replace(/\s+/g, '_');
+  if (k === 'mom' || k === 'mother' || s === 'أم' || s === 'ماما') return 'mom';
+  if (k === 'dad' || k === 'father' || s === 'أب' || s === 'بابا') return 'dad';
+  if (k === 'maher' || k === 'brother' || s === 'ماهر' || s === 'أخ') return 'maher';
+  if (k === 'mjeed' || k === 'friend' || s === 'مجيد' || s === 'صديق') return 'mjeed';
+  return 'mom';
 }
 
 export type AudioPayload = {
@@ -561,6 +561,32 @@ function parseApiErrorBody(text: string) {
     return text;
   } catch {
     return text;
+  }
+}
+
+/** POST /tts — parse `{ error, code? }` from backend (OpenAI errors are never keyed in the app). */
+function parseTtsErrorPayload(
+  status: number,
+  raw: string,
+): { message: string; code?: string } {
+  try {
+    const parsed = JSON.parse(raw) as { error?: string; code?: string };
+    const msg =
+      typeof parsed.error === 'string' && parsed.error.trim()
+        ? parsed.error.trim()
+        : parseApiErrorBody(raw);
+    const code = typeof parsed.code === 'string' ? parsed.code : undefined;
+    return { message: msg || `HTTP ${status}`, code };
+  } catch {
+    const fallback = parseApiErrorBody(raw) || `HTTP ${status}`;
+    if (/incorrect api key|401/i.test(raw) || /incorrect api key|401/i.test(fallback)) {
+      return {
+        message:
+          'Voice synthesis failed: the server OpenAI key is invalid or missing. Set OPENAI_API_KEY (sk-…) on the backend only — never in Expo.',
+        code: 'OPENAI_UNAUTHORIZED',
+      };
+    }
+    return { message: fallback };
   }
 }
 
@@ -726,7 +752,7 @@ export async function sendProactiveContextCheck(
 
 export async function sendChat(
   message: string,
-  _person: VoicePerson = 'maher',
+  _person: ChatPersona = 'maher',
   _location?: LatLng | null,
   options?: {
     userId?: string;
@@ -902,7 +928,7 @@ export async function askTwinVision(
 
 export async function textToSpeech(
   text: string,
-  person: VoicePerson = 'maher',
+  person: VoicePerson | ChatPersona | string = 'mom',
 ): Promise<AudioPayload> {
   const trimmed = String(text ?? '').trim();
   if (!trimmed) {
@@ -914,19 +940,35 @@ export async function textToSpeech(
     const res = await authedFetch(TTS_URL, {
       method: 'POST',
       headers: { ...JSON_HEADERS },
-      body: JSON.stringify({ text: trimmed, person: ttsPerson }),
+      body: JSON.stringify({
+        text: trimmed,
+        person: ttsPerson,
+        character: ttsPerson,
+      }),
     });
     const raw = await res.text();
     console.log('[api] POST /tts response', { status: res.status, bytes: raw.length });
     if (!res.ok) {
-      console.error('[api] POST /tts error', { status: res.status, raw });
-      throw new Error(parseApiErrorBody(raw) || `HTTP ${res.status}`);
+      console.error('[api] POST /tts error', { status: res.status, raw: raw.slice(0, 500) });
+      const { message, code } = parseTtsErrorPayload(res.status, raw);
+      if (res.status === 401 || code === 'OPENAI_UNAUTHORIZED' || code === 'OPENAI_KEY_FORMAT') {
+        throw new Error(message);
+      }
+      if (res.status >= 500) {
+        throw new Error(message || `Server error (${res.status}) while generating speech.`);
+      }
+      throw new Error(message || `HTTP ${res.status}`);
     }
-    const data = JSON.parse(raw) as Partial<AudioPayload> & {
+    let data: Partial<AudioPayload> & {
       audioBase64?: string;
       audioMimeType?: string;
       mimeType?: string;
     };
+    try {
+      data = JSON.parse(raw) as typeof data;
+    } catch {
+      throw new Error('Invalid /tts response: not valid JSON.');
+    }
     const b64 = data.audioBase64;
     const mime = data.audioMimeType ?? data.mimeType;
     const voice = data.voice ?? 'default';
@@ -951,7 +993,7 @@ export async function textToSpeech(
 
 export const transcribeAudio = async (
   uri: string,
-  _person: VoicePerson = 'maher',
+  _person: ChatPersona = 'maher',
 ): Promise<TranscribeResult> => {
   void _person;
   if (!uri) throw new Error('Missing recording URI.');
@@ -992,7 +1034,7 @@ export const transcribeAudio = async (
 /** Voice pipeline: POST /chat with `{ message, person }` → `{ reply }` (persona branch on server). */
 export async function postVoicePersonChat(
   message: string,
-  person: VoicePerson,
+  person: ChatPersona,
 ): Promise<{ reply: string }> {
   const trimmed = String(message || '').trim();
   if (!trimmed) throw new Error('postVoicePersonChat: empty message.');
@@ -1166,10 +1208,9 @@ export async function sendAutonomousAgentMessage(
 
 export async function synthesizeSpeech(
   _idToken: string,
-  character: Character,
+  voice: VoicePerson,
   text: string,
 ): Promise<AudioPayload> {
-  const voice: VoicePerson =
-    character === 'family' ? 'maher' : character;
+  void _idToken;
   return textToSpeech(text, voice);
 }
